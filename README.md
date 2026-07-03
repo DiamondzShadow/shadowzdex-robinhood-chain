@@ -28,6 +28,23 @@ Explorer: https://explorer.testnet.chain.robinhood.com
 **Fill tx:** [`0x66e9376cf66f374f06be4a9856e9f8e7b570da5589c87b8b425d02db60079b35`](https://explorer.testnet.chain.robinhood.com/tx/0x66e9376cf66f374f06be4a9856e9f8e7b570da5589c87b8b425d02db60079b35)
 — `IntentRouter.executeSwap` → `100 USDC` in, `0.5 tNVDA` out, `minOut` enforced.
 
+### Phase 1 — real Stock Tokens listed on ShadowzDex
+
+Faucet Stock Tokens now trade through the **same** `IntentRouter` via real
+constant-product pools (`ConstantProductAdapter`, 0.30% fee, genuine slippage).
+A live buy of **100 USDC → ~0.312 TSLA** filled and moved the curve (post-trade
+quote fell to 0.275 TSLA/100 USDC).
+
+| Market | Pool (adapter) | Stock Token |
+|---|---|---|
+| TSLA / USDC | `0x24014a267D5CfA33e2D8d57082Da2657a304f83F` | `0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E` |
+| AMD / USDC | `0x54421fdcC9Ec50867D24367201bEEDc232C25998` | `0x71178BAc73cBeb415514eB542a8995b82669778d` |
+| AMZN / USDC | `0x09ccA9757B350a10A7B0346b42C8b7d027ac80Ed` | `0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02` |
+
+Adding a market is one call — deploy a `ConstantProductAdapter`, seed it, and
+`router.setVenue(keccak256("<SYM>_MKT"), pool, false)`. NFLX, PLTR, wGOLD, wETH,
+wBTC (all faucet-available) drop in the same way. Run: `script/ListStocks.s.sol`.
+
 ---
 
 ## What it proves
