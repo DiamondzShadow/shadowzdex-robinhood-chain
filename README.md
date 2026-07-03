@@ -60,6 +60,23 @@ Live example: [`0xda9ba38e…5288`](https://explorer.testnet.chain.robinhood.com
 — "buy $50 of AMD" → on-chain fill on Robinhood Chain testnet. Keys are read from
 `../.env` (git-ignored); nothing is hardcoded.
 
+### Tax-aware co-pilot (the differentiator)
+
+A **MongoDB tax-lot ledger** (`copilot/ledger.mjs`) sits under the co-pilot. Every
+buy opens a lot with cost basis; every sell consumes lots **FIFO** and realizes
+gain/loss; positions are **marked to the Chainlink oracle**; and "harvest"
+sells positions trading below basis to book the loss. A `report` prints
+open positions + realized P/L (YTD) as Form-8949-style rows.
+
+```bash
+node copilot.mjs "buy $60 of TSLA"     # opens a lot (basis tracked)
+node copilot.mjs "show my taxes"        # positions marked to Chainlink + realized P/L
+node copilot.mjs "harvest my losses"    # sells only positions below basis
+```
+
+Nobody onchain does tax-aware trading — and it speaks straight to Robinhood's
+retail base. Lots live in Atlas (`rh_tax_lots` / `rh_tax_realized`).
+
 ### Oracle-verified attestor (Chainlink)
 
 The attestor won't sign a mispriced pool. Before signing, it reads the pool's spot

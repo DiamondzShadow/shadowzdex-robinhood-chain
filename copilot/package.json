@@ -4,5 +4,8 @@
   "type": "module",
   "private": true,
   "description": "Natural-language trading co-pilot for ShadowzDex on Robinhood Chain",
-  "dependencies": { "viem": "^2.21.0" }
+  "dependencies": {
+    "mongodb": "^7.4.0",
+    "viem": "^2.21.0"
+  }
 }
