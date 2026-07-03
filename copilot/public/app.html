@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ShadowzDex Co-pilot · Robinhood Chain</title>
+<style>
+  :root{--bg:#05060D;--surface:#0B0E1A;--elev:#12162A;--border:#1A1F35;--violet:#A855F7;--cyan:#2DE2FF;--magenta:#FF2E9A;--up:#24E0A0;--down:#FF4D6D;--text:#E8ECFF;--mute:#7A83A8;--mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;--sans:"Space Grotesk",system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  *{box-sizing:border-box}html,body{height:100%}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,rgba(168,85,247,.12),transparent 60%),var(--bg);color:var(--text);font-family:var(--sans);display:flex;flex-direction:column;align-items:center}
+  .wrap{width:100%;max-width:760px;height:100dvh;display:flex;flex-direction:column;padding:0 16px}
+  header{padding:20px 4px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+  .mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--violet),var(--cyan));box-shadow:0 0 24px rgba(45,226,255,.35);flex:none}
+  h1{font-size:18px;margin:0;letter-spacing:-.01em}h1 span{color:var(--cyan)}
+  .sub{margin:2px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--mute)}
+  #connect{margin-left:auto;background:var(--elev);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;border-radius:999px;padding:8px 14px;cursor:pointer;white-space:nowrap}
+  #connect.on{border-color:var(--up);color:var(--up)}
+  #log{flex:1;overflow-y:auto;padding:18px 2px;display:flex;flex-direction:column;gap:13px}
+  .msg{max-width:88%;padding:11px 14px;border-radius:14px;font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+  .user{align-self:flex-end;background:linear-gradient(135deg,rgba(168,85,247,.28),rgba(168,85,247,.16));border:1px solid rgba(168,85,247,.4);border-bottom-right-radius:4px}
+  .agent{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#cfd6f5}
+  .agent .l{display:block}.ok{color:var(--up)}.bad{color:var(--down)}.info{color:var(--cyan)}
+  .agent a{color:var(--cyan);text-decoration:none;border-bottom:1px solid rgba(45,226,255,.4)}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;padding:6px 2px 10px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--mute);background:var(--elev);border:1px solid var(--border);border-radius:999px;padding:6px 12px;cursor:pointer}
+  .chip:hover{color:var(--text);border-color:var(--cyan)}
+  form{display:flex;gap:10px;padding:8px 0 16px}
+  input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;color:var(--text);font-family:var(--sans);font-size:15px;padding:13px 15px;outline:none}
+  input:focus{border-color:var(--violet)}
+  button.send{background:linear-gradient(135deg,var(--violet),var(--cyan));color:#05060D;font-weight:600;border:0;border-radius:12px;padding:0 20px;font-size:14px;cursor:pointer;font-family:var(--sans)}
+  button:disabled{opacity:.5}
+  .hint{font-family:var(--mono);font-size:10px;color:var(--mute);text-align:center;padding-bottom:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="mark"></span>
+    <div><h1>ShadowzDex <span>Co-pilot</span></h1><p class="sub">tax-aware · oracle-verified · Robinhood Chain testnet</p></div>
+    <button id="connect">Connect wallet</button>
+  </header>
+  <div id="log"></div>
+  <div class="chips" id="chips">
+    <span class="chip">buy $25 of TSLA</span><span class="chip">buy $20 of AMZN</span><span class="chip">show my taxes</span>
+  </div>
+  <form id="f"><input id="i" autocomplete="off" placeholder='e.g. "buy $50 of TSLA"' /><button class="send" id="b" type="submit">Send</button></form>
+  <p class="hint">the co-pilot signs the quote (Chainlink-checked); your wallet executes it</p>
+</div>
+
+<script type="module">
+import { createPublicClient, createWalletClient, custom, http, defineChain, formatUnits, maxUint256 } from "https://esm.sh/viem@2.21.55";
+
+const log=document.getElementById("log"), input=document.getElementById("i"), btn=document.getElementById("b"), connectBtn=document.getElementById("connect");
+let CFG, chain, pub, account=null, wallet=null;
+
+const erc20=[{name:"allowance",type:"function",stateMutability:"view",inputs:[{type:"address"},{type:"address"}],outputs:[{type:"uint256"}]},{name:"approve",type:"function",stateMutability:"nonpayable",inputs:[{type:"address"},{type:"uint256"}],outputs:[{type:"bool"}]},{name:"balanceOf",type:"function",stateMutability:"view",inputs:[{type:"address"}],outputs:[{type:"uint256"}]}];
+const INTENT={type:"tuple",components:[{name:"user",type:"address"},{name:"tokenIn",type:"address"},{name:"tokenOut",type:"address"},{name:"amountIn",type:"uint256"},{name:"minOut",type:"uint256"},{name:"deadline",type:"uint256"},{name:"venue",type:"bytes32"},{name:"nonce",type:"uint256"},{name:"extra",type:"bytes"},{name:"bridgeFeeAmount",type:"uint256"},{name:"sdmTier",type:"uint8"}]};
+const routerAbi=[{name:"executeSwap",type:"function",stateMutability:"nonpayable",inputs:[INTENT,{name:"signature",type:"bytes"},{name:"adapterData",type:"bytes"}],outputs:[{type:"uint256"}]}];
+
+function bubble(cls){const d=document.createElement("div");d.className="msg "+cls;log.appendChild(d);log.scrollTop=log.scrollHeight;return d;}
+function line(a,t,cls=""){const s=document.createElement("span");s.className="l "+cls;s.innerHTML=String(t).replace(/(https?:\/\/[^\s]+)/g,u=>`<a href="${u}" target="_blank" rel="noopener">${u.replace(/^https?:\/\//,"")}</a>`);a.appendChild(s);log.scrollTop=log.scrollHeight;}
+const usd=n=>`$${Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+
+async function boot(){
+  CFG=await (await fetch("/api/config")).json();
+  chain=defineChain({id:CFG.chainId,name:"Robinhood Chain Testnet",nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18},rpcUrls:{default:{http:[CFG.rpc]}}});
+  pub=createPublicClient({chain,transport:http()});
+  const hi=bubble("agent");line(hi,"👋 I trade tokenized stocks on Robinhood Chain — in plain English.");line(hi,"Connect a wallet (chain 46630), then: buy $50 of TSLA · show my taxes","info");
+}
+async function connect(){
+  if(!window.ethereum){alert("Install a browser wallet (MetaMask) and add Robinhood Chain testnet.");return;}
+  const [addr]=await window.ethereum.request({method:"eth_requestAccounts"});
+  account=addr;
+  try{ await window.ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x"+CFG.chainId.toString(16)}]}); }
+  catch(e){ if(e.code===4902){ await window.ethereum.request({method:"wallet_addEthereumChain",params:[{chainId:"0x"+CFG.chainId.toString(16),chainName:"Robinhood Chain Testnet",nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18},rpcUrls:[CFG.rpc],blockExplorerUrls:[CFG.explorer]}]}); } }
+  wallet=createWalletClient({account,chain,transport:custom(window.ethereum)});
+  connectBtn.textContent=addr.slice(0,6)+"…"+addr.slice(-4);connectBtn.classList.add("on");
+}
+connectBtn.onclick=connect;
+
+async function send(text){
+  if(!text.trim())return; input.value="";
+  bubble("user").textContent=text;
+  const a=bubble("agent"); line(a,"🤖 thinking…","info");
+  if(!account){ line(a,"🔌 connect a wallet first (top-right).","bad"); return; }
+  try{
+    const r=await (await fetch("/api/intent",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({message:text,wallet:account})})).json();
+    a.innerHTML="";
+    if(r.error){ line(a,"✗ "+r.error,"bad"); return; }
+    if(r.kind==="report"){
+      line(a,"📒 Your positions (marked to Chainlink):","info");
+      if(!r.positions.length) line(a,"   (none yet — buy something)");
+      for(const p of r.positions){ const unreal=p.valueUsd-p.basisUsd; line(a,`   ${p.symbol.padEnd(5)} ${p.qty.toFixed(4)} sh · basis ${usd(p.basisUsd)} · value ${usd(p.valueUsd)} · ${unreal>=0?"+":""}${usd(unreal)}`,unreal>=0?"ok":"bad"); }
+      line(a,`Realized P/L (YTD): ${r.realizedYtd>=0?"+":""}${usd(r.realizedYtd)}`); return;
+    }
+    if(r.kind==="rejected"){ line(a,`🔗 Chainlink ${r.symbol} ${usd(r.oracle)} · pool ${usd(r.spot)} · dev ${r.devBps}bps`,"info"); line(a,"🔒 "+r.message,"bad"); return; }
+    if(r.kind!=="buy"){ line(a,r.message||"unsupported"); return; }
+    // buy: user executes
+    line(a,`🔗 Chainlink ${r.symbol} ${usd(r.oracle)} · quote ~${Number(formatUnits(BigInt(r.expOut),18)).toFixed(4)} ${r.symbol} for ${usd(r.dollars)}`,"info");
+    line(a,"✍️ attestor signed — approve in your wallet…");
+    const it=r.intent, amountIn=BigInt(it.amountIn);
+    const intent={user:it.user,tokenIn:it.tokenIn,tokenOut:it.tokenOut,amountIn,minOut:BigInt(it.minOut),deadline:BigInt(it.deadline),venue:it.venue,nonce:BigInt(it.nonce),extra:it.extra,bridgeFeeAmount:BigInt(it.bridgeFeeAmount),sdmTier:it.sdmTier};
+    const allow=await pub.readContract({address:r.usdc,abi:erc20,functionName:"allowance",args:[account,r.router]});
+    if(allow<amountIn){ const h=await wallet.writeContract({address:r.usdc,abi:erc20,functionName:"approve",args:[r.router,maxUint256]}); await pub.waitForTransactionReceipt({hash:h}); }
+    const before=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
+    line(a,"🚀 executing…");
+    const hash=await wallet.writeContract({address:r.router,abi:routerAbi,functionName:"executeSwap",args:[intent,r.signature,"0x"]});
+    await pub.waitForTransactionReceipt({hash});
+    const after=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
+    const qty=Number(formatUnits(after-before,18));
+    await fetch("/api/record",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({wallet:account,symbol:r.symbol,qty,costUsd:r.dollars,tx:hash})});
+    line(a,`✅ bought ${qty.toFixed(6)} ${r.symbol} for ${usd(r.dollars)} (basis ${usd(r.dollars/qty)}/sh)`,"ok");
+    line(a,`${CFG.explorer}/tx/${hash}`);
+  }catch(e){ line(a,"✗ "+(e.shortMessage||e.message||e),"bad"); }
+}
+document.getElementById("f").addEventListener("submit",e=>{e.preventDefault();send(input.value);});
+document.getElementById("chips").addEventListener("click",e=>{if(e.target.classList.contains("chip"))send(e.target.textContent);});
+boot();
+</script>
+</body>
+</html>
