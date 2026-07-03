@@ -9,9 +9,24 @@ or best-execution layer**. ShadowzDex already runs exactly that on Arbitrum. Thi
 repo is the first, smallest deployable proof that our stack drops onto the new
 chain unchanged.
 
-> **Status:** ✅ Proven in a gas-free fork simulation against RH Chain testnet
-> (chain `46630`). Live broadcast is one command away — it only needs testnet ETH
-> at the deployer (faucet, see below).
+> **Status:** ✅ **LIVE on Robinhood Chain testnet (chain `46630`).** A signed
+> intent filled `100 USDC → 0.5 tNVDA` on-chain — verified: the buyer's
+> Stock-Token balance reads `0.5e18`. See [Live deployment](#live-deployment).
+
+## Live deployment
+
+Deployed + proven on Robinhood Chain testnet (chain `46630`) on 2026-07-03.
+Explorer: https://explorer.testnet.chain.robinhood.com
+
+| Contract | Address |
+|---|---|
+| **IntentRouter** | [`0xec00f9cf9483065d888049af0ef546f1aac59087`](https://explorer.testnet.chain.robinhood.com/address/0xec00f9cf9483065d888049af0ef546f1aac59087) |
+| FixedRatePoolAdapter (test venue) | [`0xbaf09a8736395492ec232f083081feb2a0fe2dc2`](https://explorer.testnet.chain.robinhood.com/address/0xbaf09a8736395492ec232f083081feb2a0fe2dc2) |
+| USDC (mock, 6-dec) | `0xf9bb9944ae132cd0eb94c021920c122d26ce88cd` |
+| tNVDA — Stock Token (mock, 18-dec) | `0x900d189955e05e6a7b8f23df86a1cad86920f4b2` |
+
+**Fill tx:** [`0x66e9376cf66f374f06be4a9856e9f8e7b570da5589c87b8b425d02db60079b35`](https://explorer.testnet.chain.robinhood.com/tx/0x66e9376cf66f374f06be4a9856e9f8e7b570da5589c87b8b425d02db60079b35)
+— `IntentRouter.executeSwap` → `100 USDC` in, `0.5 tNVDA` out, `minOut` enforced.
 
 ---
 
