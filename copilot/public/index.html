@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ShadowzDex Co-pilot · Robinhood Chain</title>
+<style>
+  :root{
+    --bg:#05060D; --surface:#0B0E1A; --elev:#12162A; --border:#1A1F35;
+    --violet:#A855F7; --cyan:#2DE2FF; --magenta:#FF2E9A; --up:#24E0A0; --down:#FF4D6D;
+    --text:#E8ECFF; --mute:#7A83A8;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Space Grotesk",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,rgba(168,85,247,.12),transparent 60%),var(--bg);
+    color:var(--text);font-family:var(--sans);display:flex;flex-direction:column;align-items:center}
+  .wrap{width:100%;max-width:760px;height:100dvh;display:flex;flex-direction:column;padding:0 16px}
+  header{padding:22px 4px 14px;border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:center;gap:12px}
+  .mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--violet),var(--cyan));
+    box-shadow:0 0 24px rgba(45,226,255,.35);flex:none}
+  h1{font-size:19px;margin:0;letter-spacing:-.01em}
+  h1 span{color:var(--cyan)}
+  .sub{margin:3px 0 0;font-family:var(--mono);font-size:11px;color:var(--mute);letter-spacing:.03em}
+  .badge{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--up);
+    border:1px solid rgba(36,224,160,.35);border-radius:999px;padding:4px 10px;white-space:nowrap}
+  .badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--up);
+    margin-right:6px;vertical-align:middle;box-shadow:0 0 8px var(--up)}
+  #log{flex:1;overflow-y:auto;padding:18px 2px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:88%;padding:11px 14px;border-radius:14px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+  .user{align-self:flex-end;background:linear-gradient(135deg,rgba(168,85,247,.28),rgba(168,85,247,.16));
+    border:1px solid rgba(168,85,247,.4);border-bottom-right-radius:4px}
+  .agent{align-self:flex-start;background:var(--surface);border:1px solid var(--border);
+    border-bottom-left-radius:4px;font-family:var(--mono);font-size:12.5px;line-height:1.65;color:#cfd6f5}
+  .agent .l{display:block}
+  .agent .ok{color:var(--up)} .agent .bad{color:var(--down)} .agent .info{color:var(--cyan)} .agent .warn{color:var(--magenta)}
+  .agent a{color:var(--cyan);text-decoration:none;border-bottom:1px solid rgba(45,226,255,.4)}
+  .cursor::after{content:"▋";color:var(--cyan);animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;padding:6px 2px 10px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--mute);background:var(--elev);
+    border:1px solid var(--border);border-radius:999px;padding:6px 12px;cursor:pointer;transition:.15s}
+  .chip:hover{color:var(--text);border-color:var(--cyan)}
+  form{display:flex;gap:10px;padding:8px 0 18px}
+  input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    color:var(--text);font-family:var(--sans);font-size:15px;padding:13px 15px;outline:none}
+  input:focus{border-color:var(--violet);box-shadow:0 0 0 3px rgba(168,85,247,.18)}
+  button{background:linear-gradient(135deg,var(--violet),var(--cyan));color:#05060D;font-weight:600;
+    border:0;border-radius:12px;padding:0 20px;font-size:14px;cursor:pointer;font-family:var(--sans)}
+  button:disabled{opacity:.5;cursor:default}
+  .hint{font-family:var(--mono);font-size:10px;color:var(--mute);text-align:center;padding-bottom:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="mark"></span>
+      <div>
+        <h1>ShadowzDex <span>Co-pilot</span></h1>
+        <p class="sub">tax-aware trading · Robinhood Chain · oracle-verified</p>
+      </div>
+      <span class="badge">testnet 46630</span>
+    </div>
+  </header>
+
+  <div id="log"></div>
+
+  <div class="chips" id="chips">
+    <span class="chip">buy $50 of TSLA</span>
+    <span class="chip">buy $40 of AMZN</span>
+    <span class="chip">show my taxes</span>
+    <span class="chip">harvest my losses</span>
+  </div>
+
+  <form id="f">
+    <input id="i" autocomplete="off" placeholder='Tell the co-pilot — e.g. "buy $100 of TSLA"' />
+    <button id="b" type="submit">Send</button>
+  </form>
+  <p class="hint">natural language → attestor-signed, Chainlink-checked fill on Robinhood Chain</p>
+</div>
+
+<script>
+  const log = document.getElementById("log");
+  const input = document.getElementById("i");
+  const btn = document.getElementById("b");
+  const form = document.getElementById("f");
+
+  function bubble(cls){ const d=document.createElement("div"); d.className="msg "+cls; log.appendChild(d); log.scrollTop=log.scrollHeight; return d; }
+  function classify(t){
+    if(/^✅|complete|filled|bought|sold|passed|✓/.test(t)) return "ok";
+    if(/^🔒|^✗|REFUSES|failed|reverted/.test(t)) return "bad";
+    if(/^🔗|^📈|^📒|^🧾|Chainlink/.test(t)) return "info";
+    if(/^📉|^🟢|harvest/i.test(t)) return "warn";
+    return "";
+  }
+  function linkify(t){
+    return t.replace(/(https?:\/\/[^\s]+)/g, u=>`<a href="${u}" target="_blank" rel="noopener">${u.replace(/^https?:\/\//,"")}</a>`);
+  }
+  function appendLine(agent, text){
+    const span=document.createElement("span");
+    span.className="l "+classify(text);
+    span.innerHTML=linkify(text);
+    agent.appendChild(span);
+    log.scrollTop=log.scrollHeight;
+  }
+
+  let busy=false;
+  function send(text){
+    if(busy || !text.trim()) return;
+    busy=true; btn.disabled=true; input.value="";
+    bubble("user").textContent=text;
+    const agent=bubble("agent"); agent.classList.add("cursor");
+    const es=new EventSource("/chat?m="+encodeURIComponent(text));
+    es.addEventListener("line", e=>appendLine(agent, JSON.parse(e.data)));
+    es.addEventListener("done", ()=>{ es.close(); agent.classList.remove("cursor"); busy=false; btn.disabled=false; input.focus(); });
+    es.onerror=()=>{ es.close(); agent.classList.remove("cursor"); if(!agent.textContent) appendLine(agent,"✗ connection lost"); busy=false; btn.disabled=false; };
+  }
+
+  form.addEventListener("submit", e=>{ e.preventDefault(); send(input.value); });
+  document.getElementById("chips").addEventListener("click", e=>{ if(e.target.classList.contains("chip")) send(e.target.textContent); });
+  // greeting
+  const hello=bubble("agent");
+  appendLine(hello,"👋 I trade tokenized stocks on Robinhood Chain — in plain English.");
+  appendLine(hello,"Try: buy $100 of TSLA · sell all my AMD · harvest my losses · show my taxes");
+  input.focus();
+</script>
+</body>
+</html>

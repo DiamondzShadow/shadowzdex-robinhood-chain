@@ -77,6 +77,22 @@ node copilot.mjs "harvest my losses"    # sells only positions below basis
 Nobody onchain does tax-aware trading — and it speaks straight to Robinhood's
 retail base. Lots live in Atlas (`rh_tax_lots` / `rh_tax_realized`).
 
+### Web chat UI (`copilot/server.mjs` + `copilot/public/`)
+
+A browser front-end for the co-pilot — type in plain English, watch each step
+stream in (parse → Chainlink check → attestor sign → fill).
+
+```bash
+cd copilot && node server.mjs      # → http://127.0.0.1:8799
+```
+
+Keys stay on the server; the browser only sends text and receives log lines
+(SSE). Proven live: "show my taxes" streams the tax report, "buy $30 of AMZN"
+executes an oracle-checked, attestor-signed fill on-chain — both from the browser.
+
+> **Security:** binds to `127.0.0.1` and can move (testnet) funds. Don't expose
+> publicly without auth / per-user wallets — demo locally or over an SSH tunnel.
+
 ### Oracle-verified attestor (Chainlink)
 
 The attestor won't sign a mispriced pool. Before signing, it reads the pool's spot
