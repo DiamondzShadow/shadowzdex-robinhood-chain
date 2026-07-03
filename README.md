@@ -1,0 +1,125 @@
+# ShadowzDex on Robinhood Chain — Phase 0
+
+**Prove that a ShadowzDex attestor-signed intent routes through the `IntentRouter`
+and fills against a Stock-Token pool on Robinhood Chain.**
+
+Robinhood Chain (Arbitrum Orbit, EVM, chain id `46630` testnet / `4663` mainnet)
+launched with spot Stock Tokens and two AMMs — but **no intent-based aggregator
+or best-execution layer**. ShadowzDex already runs exactly that on Arbitrum. This
+repo is the first, smallest deployable proof that our stack drops onto the new
+chain unchanged.
+
+> **Status:** ✅ Proven in a gas-free fork simulation against RH Chain testnet
+> (chain `46630`). Live broadcast is one command away — it only needs testnet ETH
+> at the deployer (faucet, see below).
+
+---
+
+## What it proves
+
+```
+attestor signs SwapIntent (EIP-712, domain = this router, chainId 46630)
+        │
+        ▼
+user ──USDC──▶ IntentRouter.executeSwap(intent, sig, adapterData)
+                 │  verifies attestor sig + nonce + deadline (QuoteVerifier)
+                 │  transfers USDC ─▶ venue adapter
+                 ▼
+           FixedRatePoolAdapter ──tNVDA──▶ router ──▶ user
+                 │  (a stand-in Stock-Token pool)
+                 ▼
+           minOut enforced, SwapExecuted emitted
+```
+
+The simulation deploys the **real** `IntentRouter` + `QuoteVerifier` (vendored
+verbatim from ShadowzDex), registers a venue, signs an intent with `vm.sign`, and
+asserts the fill:
+
+| In | Out | Check |
+|----|-----|-------|
+| `100 USDC` (6-dec) | `0.5 tNVDA` (18-dec) @ `$200` | `got == reported == 0.5e18`, `got >= minOut` |
+
+Estimated gas for the whole deploy-and-fill: **~0.000118 ETH**.
+
+---
+
+## Repo layout
+
+```
+src/shadowz/        IntentRouter, QuoteVerifier, FeeVault, interfaces
+                    — vendored verbatim from DiamondzShadow/ShadowzDex (audited path)
+src/kit/            MockERC20 (USDC / Stock-Token stand-ins)
+                    FixedRatePoolAdapter (IVenueAdapter — TEST-ONLY, fixed price)
+script/DeployProve  deploy + sign + fill + assert, in one run
+```
+
+## Quickstart
+
+```bash
+# 1. gas-free simulation against a RH Chain testnet fork (real chainId 46630 domain)
+forge script script/DeployProve.s.sol --fork-url rh_testnet -vvvv
+
+# 2. live broadcast (needs the deployer funded — see Faucet)
+cp .env.example .env      # set DEPLOYER_PK + ATTESTOR_PK
+forge script script/DeployProve.s.sol --rpc-url rh_testnet --broadcast \
+  --private-key $DEPLOYER_PK
+```
+
+### Network
+| | value |
+|---|---|
+| Testnet RPC | `https://rpc.testnet.chain.robinhood.com` (wired as `rh_testnet`) |
+| Chain ID | `46630` |
+| Explorer | https://explorer.testnet.chain.robinhood.com |
+| Faucet | https://faucet.testnet.chain.robinhood.com — 0.05 ETH + Stock Tokens / 24h |
+
+**The only manual step:** claim testnet ETH from the faucet to the deployer
+address, then run step 2. The faucet also dispenses real testnet Stock Tokens,
+which replace `FixedRatePoolAdapter` with a live pool in Phase 1.
+
+---
+
+## Security posture
+
+Built to the standard the hackathon (and real funds) demand:
+
+- **No secrets in git.** `.env`, `cache/`, and `broadcast/` are git-ignored — note
+  that Foundry writes resolved private keys into `cache/**/run-latest.json`, so
+  that path is excluded explicitly. Keys come from env only; `.env.example` ships
+  placeholders.
+- **Audited core, unchanged.** `IntentRouter` / `QuoteVerifier` are vendored
+  verbatim from ShadowzDex (live on Arbitrum) — attestor-signature verification,
+  per-user nonce replay guard, deadline expiry, and slippage (`minOut`) are the
+  same reviewed code, not a reimplementation. OpenZeppelin v5 for AccessControl /
+  EIP-712 / ECDSA / SafeERC20.
+- **Test-only clearly labeled.** `FixedRatePoolAdapter` has a fixed price and no
+  oracle — it exists solely to prove the pipeline and is **not** for mainnet. Real
+  venues use `DodoAdapter` / `V4SwapAdapter` against live pools with attestor
+  quotes sanity-checked by Chainlink feeds.
+- **Least privilege by default.** Permit2 disabled (zero address) unless wired;
+  `sdmToken` unset disables tier logic on testnet; `feeBps` starts at 0.
+- **Reproducible.** Pinned solc `0.8.24`, deterministic build.
+
+---
+
+## How ShadowzDex is positioned on Robinhood Chain
+
+We do **not** compete with Uniswap or Pleiades (the chain's liquidity venues). We
+sit **above** them:
+
+- **The best-execution / intent layer the chain lacks** — one attestor-signed,
+  gasless intent, routed to the best fill across Uniswap + Pleiades + our own
+  pools. The 1inch/CoW of Robinhood Chain, but intent-based.
+- **The agentic front-end** — our AI co-pilot turns natural language into these
+  intents, so the router is the execution spine under a tax-aware trading agent.
+
+Complements the ecosystem, captures the routing layer. See the ecosystem strategy
+brief for the full plan.
+
+---
+
+## Provenance
+
+`src/shadowz/**` is copied from [`DiamondzShadow/ShadowzDex`](https://github.com/DiamondzShadow/ShadowzDex)
+at the current `IntentRouter` revision. In a productionized repo these become a git
+submodule or an npm package to keep a single source of truth.

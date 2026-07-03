@@ -1,0 +1,16 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Foundry build + run artifacts
+out/
+cache/
+broadcast/
+# ^ forge writes resolved private keys into cache/**/run-latest.json — keep it out of git
+
+# Node / misc
+node_modules/
+.DS_Store
