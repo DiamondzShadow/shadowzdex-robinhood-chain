@@ -60,10 +60,29 @@ Live example: [`0xda9ba38e…5288`](https://explorer.testnet.chain.robinhood.com
 — "buy $50 of AMD" → on-chain fill on Robinhood Chain testnet. Keys are read from
 `../.env` (git-ignored); nothing is hardcoded.
 
-**Chainlink on Robinhood Chain** — Data Feeds (equity reference prices incl.
-NVDA/GOOG/AAPL), Data Streams, and CCIP are the chain's official oracle layer from
-block zero. Next hardening step: the attestor verifies each quote against the
-Chainlink equity feed before signing, so every fill is oracle-checked.
+### Oracle-verified attestor (Chainlink)
+
+The attestor won't sign a mispriced pool. Before signing, it reads the pool's spot
+price and the **Chainlink equity feed** (`AggregatorV3Interface`) and refuses if
+they deviate beyond `oracleMaxDevBps` (default 500 = 5%).
+
+```
+🔗 Chainlink AMZN/USD $200.00 · pool spot $200.00 · dev 0bps  → signs ✓
+🔗 Chainlink AMZN/USD $400.00 · pool spot $227.51 · dev 4312bps → 🔒 REFUSES to sign
+```
+
+Both paths proven live on testnet (the feed was set to $400 to force the reject,
+then reset). Chainlink is Robinhood Chain's **official** oracle from block zero
+(Data Feeds / Data Streams / CCIP), so on mainnet the `feed` address in
+`markets.json` becomes the real Chainlink equity feed — the co-pilot code is
+unchanged. Testnet feeds here are `AggregatorV3Interface`-compatible stand-ins
+(`MockAggregator`), deployed by `script/DeployFeeds.s.sol`.
+
+| Feed | Address (testnet) | Price |
+|---|---|---|
+| TSLA/USD | `0xb171be80e24e1084089a8b6fd839151aa8804816` | $300 |
+| AMD/USD | `0xd3db2eb0a6660fc4bb1a481043477c52b8b01510` | $150 |
+| AMZN/USD | `0xa241946718dd761b006e68a0aa53d028580e383e` | $200 |
 
 ---
 

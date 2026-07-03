@@ -4,9 +4,10 @@
   "explorer": "https://explorer.testnet.chain.robinhood.com",
   "router": "0xEc00f9cf9483065d888049Af0eF546f1aAc59087",
   "usdc": "0xf9bb9944Ae132CD0EB94c021920c122d26CE88cD",
+  "oracleMaxDevBps": 500,
   "markets": {
-    "TSLA": { "name": "Tesla",  "stock": "0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E", "venue": "TSLA_MKT", "pool": "0x24014a267D5CfA33e2D8d57082Da2657a304f83F" },
-    "AMD":  { "name": "AMD",    "stock": "0x71178BAc73cBeb415514eB542a8995b82669778d", "venue": "AMD_MKT",  "pool": "0x54421fdcC9Ec50867D24367201bEEDc232C25998" },
-    "AMZN": { "name": "Amazon", "stock": "0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02", "venue": "AMZN_MKT", "pool": "0x09ccA9757B350a10A7B0346b42C8b7d027ac80Ed" }
+    "TSLA": { "name": "Tesla",  "stock": "0xC9f9c86933092BbbfFF3CCb4b105A4A94bf3Bd4E", "venue": "TSLA_MKT", "pool": "0x24014a267D5CfA33e2D8d57082Da2657a304f83F", "feed": "0xb171be80e24e1084089a8b6fd839151aa8804816" },
+    "AMD":  { "name": "AMD",    "stock": "0x71178BAc73cBeb415514eB542a8995b82669778d", "venue": "AMD_MKT",  "pool": "0x54421fdcC9Ec50867D24367201bEEDc232C25998", "feed": "0xd3db2eb0a6660fc4bb1a481043477c52b8b01510" },
+    "AMZN": { "name": "Amazon", "stock": "0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02", "venue": "AMZN_MKT", "pool": "0x09ccA9757B350a10A7B0346b42C8b7d027ac80Ed", "feed": "0xa241946718dd761b006e68a0aa53d028580e383e" }
   }
 }

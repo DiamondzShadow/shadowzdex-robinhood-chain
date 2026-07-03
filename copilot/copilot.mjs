@@ -61,8 +61,17 @@ const routerAbi = [
     inputs: [SWAP_INTENT, { name: "signature", type: "bytes" }, { name: "adapterData", type: "bytes" }],
     outputs: [{ type: "uint256" }] },
 ];
-const poolAbi = [{ name: "quote", type: "function", stateMutability: "view",
-  inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "uint256" }] }];
+const poolAbi = [
+  { name: "quote", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "uint256" }] },
+  { name: "reserveUsdc", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  { name: "reserveStock", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+];
+// Chainlink AggregatorV3Interface (real feed on mainnet; our test feed on testnet)
+const feedAbi = [
+  { name: "latestRoundData", type: "function", stateMutability: "view", inputs: [], outputs: [
+    { type: "uint80" }, { type: "int256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint80" }] },
+  { name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
+];
 const erc20Abi = [
   { name: "allowance", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }] },
   { name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] },
@@ -120,6 +129,26 @@ async function main() {
   const amountIn = parseUnits(String(usdc), 6); // USDC 6-dec
   const expOut = await pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "quote", args: [cfg.usdc, amountIn] });
   console.log(`📈 quote: ~${formatUnits(expOut, 18)} ${sym}  (via ShadowzDex ${mkt.venue} pool)`);
+
+  // ── Chainlink oracle check — the attestor refuses to sign a mispriced pool ──
+  if (mkt.feed) {
+    const [rU, rS, rd, fdec] = await Promise.all([
+      pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "reserveUsdc" }),
+      pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "reserveStock" }),
+      pub.readContract({ address: mkt.feed, abi: feedAbi, functionName: "latestRoundData" }),
+      pub.readContract({ address: mkt.feed, abi: feedAbi, functionName: "decimals" }),
+    ]);
+    const poolSpot = Number(formatUnits(rU, 6)) / Number(formatUnits(rS, 18)); // USD / share
+    const oracle = Number(formatUnits(rd[1], fdec));
+    const devBps = Math.round((Math.abs(poolSpot - oracle) / oracle) * 10000);
+    const maxDev = Number(env.ORACLE_MAX_DEV_BPS ?? cfg.oracleMaxDevBps ?? 500);
+    console.log(`🔗 Chainlink ${sym}/USD $${oracle.toFixed(2)} · pool spot $${poolSpot.toFixed(2)} · dev ${devBps}bps (max ${maxDev})`);
+    if (devBps > maxDev) {
+      console.error(`🔒 attestor REFUSES to sign — pool deviates ${devBps}bps from the Chainlink oracle (> ${maxDev}). No signature issued.`);
+      process.exit(2);
+    }
+    console.log(`🔗 oracle check passed ✓ — safe to sign`);
+  }
 
   const intent = {
     user: user.address, tokenIn: cfg.usdc, tokenOut: mkt.stock,
