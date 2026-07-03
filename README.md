@@ -45,6 +45,26 @@ Adding a market is one call — deploy a `ConstantProductAdapter`, seed it, and
 `router.setVenue(keccak256("<SYM>_MKT"), pool, false)`. NFLX, PLTR, wGOLD, wETH,
 wBTC (all faucet-available) drop in the same way. Run: `script/ListStocks.s.sol`.
 
+### Co-pilot — natural-language trading (`copilot/`)
+
+The flagship: say what you want, it fills. Fireworks parses the instruction, the
+attestor signs the intent, and the router executes it against the live markets.
+
+```bash
+cd copilot && npm install
+node copilot.mjs "buy $50 of AMD"
+# → parsed · quoted · attestor-signed · executeSwap · ✅ 0.3116 AMD in your wallet
+```
+
+Live example: [`0xda9ba38e…5288`](https://explorer.testnet.chain.robinhood.com/tx/0xda9ba38e6c7b11d97be8439c538c7b5c2370cc323e96af93ddf146ea58305288)
+— "buy $50 of AMD" → on-chain fill on Robinhood Chain testnet. Keys are read from
+`../.env` (git-ignored); nothing is hardcoded.
+
+**Chainlink on Robinhood Chain** — Data Feeds (equity reference prices incl.
+NVDA/GOOG/AAPL), Data Streams, and CCIP are the chain's official oracle layer from
+block zero. Next hardening step: the attestor verifies each quote against the
+Chainlink equity feed before signing, so every fill is oracle-checked.
+
 ---
 
 ## What it proves
