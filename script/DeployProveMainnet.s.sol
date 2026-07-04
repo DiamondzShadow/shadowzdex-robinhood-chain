@@ -66,7 +66,11 @@ contract DeployProveMainnet {
         require(pk != 0, "DEPLOYER_PK env var is required");
         address me = vm.addr(pk);
 
-        address admin = vm.envAddress("ADMIN");
+        // ADMIN_EOA=true → bootstrap deploy with the DEPLOYER as temporary admin (no
+        // Safe). Hand off later by re-running with INTENT_ROUTER + ADMIN=<safe> +
+        // RENOUNCE_DEPLOYER=true. Default false → the Safe-admin path.
+        bool adminEoa = vm.envOr("ADMIN_EOA", false);
+        address admin = adminEoa ? me : vm.envAddress("ADMIN");
         address attestor = vm.envAddress("ATTESTOR");
         address permit2 = vm.envOr("PERMIT2", address(0));
         uint256 feeBps = vm.envOr("FEE_BPS", uint256(0));
@@ -79,7 +83,7 @@ contract DeployProveMainnet {
 
         // ── Validate before deploying ──
         if (attestor == address(0)) revert ZeroAttestor();
-        if (admin.code.length == 0) revert AdminNotContract(admin); // Safe must be a deployed contract
+        if (!adminEoa && admin.code.length == 0) revert AdminNotContract(admin); // Safe must be a deployed contract
 
         vm.startBroadcast(pk);
 
@@ -105,39 +109,47 @@ contract DeployProveMainnet {
             emit FeeSet(uint16(feeBps), uint16(passDiscountBps), feeTreasury);
         }
 
-        // 4. Hand every admin role to the Safe. Best-effort Safe sanity check.
-        try ISafe(admin).getThreshold() returns (uint256 t) {
-            require(t > 0, "safe threshold 0");
-        } catch {
-            emit SafeThresholdUnverified(admin); // not a Gnosis Safe — allowed (Timelock/other), but flagged
+        // 4. Hand every admin role to the Safe (skipped in EOA-admin bootstrap —
+        //    the deployer already holds them from the constructor).
+        if (!adminEoa) {
+            try ISafe(admin).getThreshold() returns (uint256 t) {
+                require(t > 0, "safe threshold 0");
+            } catch {
+                emit SafeThresholdUnverified(admin); // not a Gnosis Safe — allowed (Timelock/other), but flagged
+            }
+            _grant(router, router.DEFAULT_ADMIN_ROLE(), admin);
+            _grant(router, router.CONFIG_ROLE(), admin);
+            _grant(router, router.PAUSER_ROLE(), admin);
+            _grant(router, router.RESCUER_ROLE(), admin);
+            _grant(router, router.SIGNER_ADMIN_ROLE(), admin);
         }
-        _grant(router, router.DEFAULT_ADMIN_ROLE(), admin);
-        _grant(router, router.CONFIG_ROLE(), admin);
-        _grant(router, router.PAUSER_ROLE(), admin);
-        _grant(router, router.RESCUER_ROLE(), admin);
-        _grant(router, router.SIGNER_ADMIN_ROLE(), admin);
 
-        // 5. Optionally drop the deployer's roles. Default false so the next step
-        //    (adapter wiring) can still use the deployer's CONFIG_ROLE. Renounce
-        //    DEFAULT_ADMIN last so earlier renounces stay authorized.
-        if (renounce) {
+        // 5. Optionally drop the deployer's roles (never in EOA-admin mode — that
+        //    would brick the router). Renounce DEFAULT_ADMIN last.
+        if (renounce && !adminEoa) {
             router.renounceRole(router.CONFIG_ROLE(), me);
             router.renounceRole(router.PAUSER_ROLE(), me);
             router.renounceRole(router.RESCUER_ROLE(), me);
             router.renounceRole(router.SIGNER_ADMIN_ROLE(), me);
             router.renounceRole(router.DEFAULT_ADMIN_ROLE(), me);
         }
-        emit AdminHandoff(admin, renounce);
+        emit AdminHandoff(admin, renounce && !adminEoa);
 
         // 6. Prove the end state.
         require(router.isAttestor(attestor), "attestor not registered");
-        require(router.hasRole(router.DEFAULT_ADMIN_ROLE(), admin), "safe lacks admin");
-        require(router.hasRole(router.CONFIG_ROLE(), admin), "safe lacks config");
-        if (renounce) {
-            require(!router.hasRole(router.DEFAULT_ADMIN_ROLE(), me), "deployer still admin");
-            require(!router.hasRole(router.CONFIG_ROLE(), me), "deployer still config");
+        if (adminEoa) {
+            require(router.hasRole(router.DEFAULT_ADMIN_ROLE(), me), "deployer not admin");
+        } else {
+            require(router.hasRole(router.DEFAULT_ADMIN_ROLE(), admin), "safe lacks admin");
+            require(router.hasRole(router.CONFIG_ROLE(), admin), "safe lacks config");
+            if (renounce) {
+                require(!router.hasRole(router.DEFAULT_ADMIN_ROLE(), me), "deployer still admin");
+                require(!router.hasRole(router.CONFIG_ROLE(), me), "deployer still config");
+            }
         }
-        emit ProofOK("IntentRouter live on RH Chain mainnet: attestor registered, Safe = admin");
+        emit ProofOK(adminEoa
+            ? "IntentRouter live on RH mainnet: attestor registered, deployer = EOA admin (bootstrap, hand to Safe later)"
+            : "IntentRouter live on RH Chain mainnet: attestor registered, Safe = admin");
 
         vm.stopBroadcast();
     }
