@@ -146,9 +146,33 @@ the same order. A market lists a V2 venue by adding to `markets.json`:
   "router": "<v2 router addr>", "feeBps": 30, "label": "Uniswap V2" }
 ```
 
-**Mainnet wiring** (once, per chain): deploy the adapter with the real router(s)
-whitelisted, `router.setVenue(keccak256("UNISWAP_V2"), adapter, false)`, and point
-each market's `univ2` venue at the real pair — no co-pilot code changes.
+**Mainnet wiring** — `script/DeployMainnetUniV2.s.sol` does it in one command
+against the live mainnet router (`rh_mainnet` = `rpc.mainnet.chain.robinhood.com`,
+chain `4663`). Every address comes from env (`.env.mainnet.example`) — nothing is
+hardcoded — and is **validated on-chain before any write**:
+
+- `INTENT_ROUTER` must have code, and the broadcaster must hold its `CONFIG_ROLE`
+  (fails fast with `MissingConfigRole` instead of a bare `setVenue` revert);
+- every `V2_ROUTERS` entry must have code **and** answer `factory() != 0` — i.e.
+  actually be a Uniswap-V2 router, so a fat-fingered address reverts `NotARouter`
+  rather than mis-wiring the live router;
+- `ADMIN` (the adapter's role admin — the per-chain Safe) must be nonzero.
+
+It deploys the adapter with the real routers whitelisted and registers one venue
+key per DEX (`VENUE_KEYS=UNISWAP_V2,RIALTO_V2`) — all resolving to the single
+adapter; the pool is chosen by `adapterData`. Then point each market's `univ2`
+venue in `markets.json` at the real pair — no co-pilot code changes.
+
+```bash
+cp .env.mainnet.example .env.mainnet    # fill in verified mainnet addresses
+forge script script/DeployMainnetUniV2.s.sol --fork-url rh_mainnet -vvvv        # dry-run
+forge script script/DeployMainnetUniV2.s.sol --rpc-url rh_mainnet --broadcast --slow
+```
+
+> The real Uniswap / Rialto router addresses weren't public at time of writing
+> (mainnet launched 2026-07) — get them from `docs.robinhood.com/chain/connecting`,
+> the mainnet explorer, Uniswap's deployment docs, or `chain-developers-group@robinhood.com`,
+> and the script's on-chain validation guarantees you can't wire a wrong one.
 
 ### Co-pilot — natural-language trading (`copilot/`)
 

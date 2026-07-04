@@ -44,6 +44,16 @@ contract MockUniswapV2 {
         return (reserve0, reserve1, 0);
     }
 
+    /// @notice Uniswap V2 router surface used by deploy-time sanity checks.
+    ///         Real routers expose factory()/WETH(); this mock is its own factory.
+    function factory() external view returns (address) {
+        return address(this);
+    }
+
+    function WETH() external view returns (address) {
+        return token0;
+    }
+
     /// @notice Uniswap V2 getAmountOut — 0.30% fee, multiply-before-divide.
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) public pure returns (uint256) {
         uint256 amountInWithFee = amountIn * 997;
