@@ -113,7 +113,7 @@ async function send(text){
     if(allow<amountIn){ const h=await wallet.writeContract({address:r.usdc,abi:erc20,functionName:"approve",args:[r.router,maxUint256]}); await pub.waitForTransactionReceipt({hash:h}); }
     const before=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
     line(a,"🚀 executing…");
-    const hash=await wallet.writeContract({address:r.router,abi:routerAbi,functionName:"executeSwap",args:[intent,r.signature,"0x"]});
+    const hash=await wallet.writeContract({address:r.router,abi:routerAbi,functionName:"executeSwap",args:[intent,r.signature,r.adapterData||"0x"]});
     await pub.waitForTransactionReceipt({hash});
     const after=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
     const qty=Number(formatUnits(after-before,18));

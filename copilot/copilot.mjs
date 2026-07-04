@@ -12,11 +12,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   createPublicClient, createWalletClient, http, defineChain,
-  keccak256, toHex, maxUint256, formatUnits, parseUnits,
+  keccak256, toHex, maxUint256, formatUnits, parseUnits, encodeAbiParameters,
 } from "viem";
 import { privateKeyToAccount, sign, serializeSignature } from "viem/accounts";
 import * as ledger from "./ledger.mjs";
-import { loadVenues, quoteAll, decide } from "./bestex.mjs";
+import { loadVenues, quoteAll, decide, adapterDataFor } from "./bestex.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
@@ -105,8 +105,10 @@ async function oracleUsd(pub, mkt) {
   ]);
   return Number(formatUnits(rd[1], dec));
 }
-// Execute one attestor-signed leg through a specific venue. Returns { out, hash }.
-async function execLeg(ctx, { venueName, tokenIn, tokenOut, amountIn, minOut }) {
+// Execute one attestor-signed leg through a specific venue. adapterData is empty
+// for constant-product pools and the encoded (router, path, feeOnTransfer) blob
+// for Uniswap V2 venues. Returns { out, hash }.
+async function execLeg(ctx, { venueName, tokenIn, tokenOut, amountIn, minOut, adapterData = "0x" }) {
   const intent = {
     user: ctx.user.address, tokenIn, tokenOut, amountIn, minOut,
     deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(venueName)),
@@ -121,7 +123,7 @@ async function execLeg(ctx, { venueName, tokenIn, tokenOut, amountIn, minOut }) 
     await ctx.pub.waitForTransactionReceipt({ hash: h });
   }
   const before = await ctx.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: "balanceOf", args: [ctx.user.address] });
-  const hash = await ctx.wallet.writeContract({ address: cfg.router, abi: routerAbi, functionName: "executeSwap", args: [intent, sig, "0x"] });
+  const hash = await ctx.wallet.writeContract({ address: cfg.router, abi: routerAbi, functionName: "executeSwap", args: [intent, sig, adapterData] });
   await ctx.pub.waitForTransactionReceipt({ hash });
   const after = await ctx.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: "balanceOf", args: [ctx.user.address] });
   return { out: after - before, hash };
@@ -135,7 +137,7 @@ async function execLeg(ctx, { venueName, tokenIn, tokenOut, amountIn, minOut }) 
 async function doSwap(ctx, { mkt, sym, tokenIn, tokenOut, amountIn }) {
   const side = tokenIn.toLowerCase() === cfg.usdc.toLowerCase() ? "usdc" : "stock";
   const oracle = await oracleUsd(ctx.pub, mkt);
-  const venues = await loadVenues(ctx.pub, mkt.venues);
+  const venues = await loadVenues(ctx.pub, mkt.venues, cfg.usdc);
   const maxDev = Number(env.ORACLE_MAX_DEV_BPS ?? cfg.oracleMaxDevBps ?? 500);
   const d = decide(venues, side, amountIn, { oracle, maxDevBps: maxDev });
 
@@ -162,7 +164,8 @@ async function doSwap(ctx, { mkt, sym, tokenIn, tokenOut, amountIn }) {
   for (const leg of plan) {
     const src = venues.find((v) => v.key === leg.key);
     const expLeg = quoteAll([src], side, leg.amountIn)[0].out;
-    const { out, hash } = await execLeg(ctx, { venueName: leg.key, tokenIn, tokenOut, amountIn: leg.amountIn, minOut: (expLeg * 98n) / 100n });
+    const adapterData = adapterDataFor(src, tokenIn, tokenOut, encodeAbiParameters);
+    const { out, hash } = await execLeg(ctx, { venueName: leg.key, tokenIn, tokenOut, amountIn: leg.amountIn, minOut: (expLeg * 98n) / 100n, adapterData });
     totalOut += out; hashes.push(hash);
   }
   return { out: totalOut, hash: hashes[0], hashes };

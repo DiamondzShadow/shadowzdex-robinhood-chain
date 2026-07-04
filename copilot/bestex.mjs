@@ -15,6 +15,11 @@ const poolAbi = [
   { name: "reserveStock", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { name: "FEE_BPS", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint16" }] },
 ];
+// Uniswap V2 pair — reserves ordered by token address (token0 < token1).
+const univ2Abi = [
+  { name: "getReserves", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint112" }, { type: "uint112" }, { type: "uint32" }] },
+  { name: "token0", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+];
 
 // x*y=k quote against local reserves — identical math to the on-chain adapter,
 // so an off-chain search never disagrees with the fill.
@@ -27,17 +32,49 @@ function quoteLocal(res, tokenIn, amountIn) {
 }
 
 // Snapshot every venue's reserves once (side = "usdc" means USDC is tokenIn / a buy).
-export async function loadVenues(pub, venuesCfg) {
+// A venue's `kind` selects how reserves are read:
+//   "cp"    — our ConstantProductAdapter (reserveUsdc/reserveStock/FEE_BPS)   [default]
+//   "univ2" — a Uniswap V2-style pair (getReserves + token0), fee from cfg (30bps)
+//             and `router` carried through so the co-pilot can build adapterData.
+export async function loadVenues(pub, venuesCfg, usdcAddr) {
   return Promise.all(
     venuesCfg.map(async (v) => {
+      const kind = v.kind ?? "cp";
+      const base = { key: v.venue, label: v.label ?? v.venue, pool: v.pool, kind, router: v.router ?? null };
+      if (kind === "univ2") {
+        const [res, token0] = await Promise.all([
+          pub.readContract({ address: v.pool, abi: univ2Abi, functionName: "getReserves" }),
+          pub.readContract({ address: v.pool, abi: univ2Abi, functionName: "token0" }),
+        ]);
+        const usdcIsToken0 = !!usdcAddr && token0.toLowerCase() === usdcAddr.toLowerCase();
+        return {
+          ...base,
+          rUsdc: usdcIsToken0 ? res[0] : res[1],
+          rStock: usdcIsToken0 ? res[1] : res[0],
+          feeBps: BigInt(v.feeBps ?? 30),
+        };
+      }
       const [rUsdc, rStock, feeBps] = await Promise.all([
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveUsdc" }),
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveStock" }),
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "FEE_BPS" }),
       ]);
-      return { key: v.venue, label: v.label ?? v.venue, pool: v.pool, rUsdc, rStock, feeBps: BigInt(feeBps) };
+      return { ...base, rUsdc, rStock, feeBps: BigInt(feeBps) };
     })
   );
+}
+
+// Build the router adapterData for one leg's venue. Constant-product pools take
+// none ("0x"); Uniswap V2 venues encode (router, [tokenIn,tokenOut], feeOnTransfer)
+// exactly as UniswapV2Adapter.execute() decodes it.
+export function adapterDataFor(venue, tokenIn, tokenOut, encodeAbiParameters) {
+  if (venue.kind === "univ2") {
+    return encodeAbiParameters(
+      [{ type: "address" }, { type: "address[]" }, { type: "bool" }],
+      [venue.router, [tokenIn, tokenOut], false]
+    );
+  }
+  return "0x";
 }
 
 // Quote each venue for the full order and sort best-first.

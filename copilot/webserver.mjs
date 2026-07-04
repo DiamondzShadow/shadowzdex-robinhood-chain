@@ -12,10 +12,10 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createPublicClient, http as vhttp, defineChain, keccak256, toHex, formatUnits, parseUnits } from "viem";
+import { createPublicClient, http as vhttp, defineChain, keccak256, toHex, formatUnits, parseUnits, encodeAbiParameters } from "viem";
 import { sign, serializeSignature } from "viem/accounts";
 import * as ledger from "./ledger.mjs";
-import { loadVenues, quoteAll, decide } from "./bestex.mjs";
+import { loadVenues, quoteAll, decide, adapterDataFor } from "./bestex.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
@@ -103,24 +103,25 @@ async function handleIntent(body) {
   // Best-execution: quote every venue that lists the symbol, drop off-band ones,
   // route the order to the best eligible venue. (The CLI co-pilot additionally
   // SPLITS across venues; the browser keeps a single-submit UX.)
-  const venues = await loadVenues(pub, mkt.venues);
+  const venues = await loadVenues(pub, mkt.venues, cfg.usdc);
   const d = decide(venues, "usdc", amountIn, { oracle, maxDevBps: maxDev });
   const routing = d.eligible
     .map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: quoteAll([v], "usdc", amountIn)[0].out.toString() }))
     .concat(d.excluded.map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: null, offBand: true })));
   if (!d.best) return { status: 200, body: { kind: "rejected", symbol: sym, oracle, maxDev, routing, message: `Attestor refuses: every ${sym} venue deviates > ${maxDev}bps from the Chainlink oracle.` } };
 
-  const best = d.best;
-  const expOut = quoteAll([venues.find((v) => v.key === best.key)], "usdc", amountIn)[0].out;
+  const bestSrc = venues.find((v) => v.key === d.best.key);
+  const expOut = quoteAll([bestSrc], "usdc", amountIn)[0].out;
+  const adapterData = adapterDataFor(bestSrc, cfg.usdc, mkt.stock, encodeAbiParameters);
   const intent = {
     user: wallet, tokenIn: cfg.usdc, tokenOut: mkt.stock, amountIn, minOut: (expOut * 98n) / 100n,
-    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(best.key)),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(d.best.key)),
     nonce: BigInt("0x" + [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")),
     extra: "0x", bridgeFeeAmount: 0n, sdmTier: 0,
   };
   const digest = await pub.readContract({ address: cfg.router, abi: routerAbi, functionName: "hashIntent", args: [intent] });
   const signature = serializeSignature(await sign({ hash: digest, privateKey: ATTESTOR_PK }));
-  return { status: 200, body: { kind: "buy", symbol: sym, dollars, expOut: expOut.toString(), oracle, spot: best.mid, routedVenue: best.key, routedLabel: best.label, vsNaiveBps: d.vsNaiveBps, routing, intent, signature, router: cfg.router, usdc: cfg.usdc } };
+  return { status: 200, body: { kind: "buy", symbol: sym, dollars, expOut: expOut.toString(), oracle, spot: d.best.mid, routedVenue: d.best.key, routedLabel: d.best.label, vsNaiveBps: d.vsNaiveBps, routing, intent, signature, adapterData, router: cfg.router, usdc: cfg.usdc } };
 }
 
 const server = http.createServer(async (req, res) => {

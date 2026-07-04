@@ -103,6 +103,53 @@ node copilot/rebalance.mjs                     # walk pools back to the oracle p
 > can push a pool out of band until you rebalance — which the router handles by
 > routing to the other venue.
 
+### Mainnet venue — real Uniswap V2 routing (`UniswapV2Adapter`)
+
+The `ConstantProductAdapter` pools above are our own seeded testnet liquidity. On
+mainnet the router routes through the **chain's real venues** — Robinhood Chain
+ships Uniswap V2 + Pleiades, both V2-style AMMs — via `UniswapV2Adapter`
+(`src/shadowz/adapters/UniswapV2Adapter.sol`), vendored from the ShadowzDex
+production `SushiV2Adapter` (live on Arbitrum), logic unchanged.
+
+One adapter serves **every** V2 pair. It decodes `adapterData` and calls the
+router directly, so it reaches brand-new, unindexed pools in a single tx:
+
+```
+adapterData = abi.encode(address v2Router, address[] path, bool feeOnTransfer)
+  • v2Router   — governance-whitelisted (allowedRouter); the attestor picks
+                 Uniswap / Pleiades / Sushi by where the pool lives
+  • path       — [tokenIn, …, tokenOut]; head/tail checked against the intent
+  • minOut     — enforced by the IntentRouter after execute() returns
+```
+
+**Proven live on Robinhood Chain testnet** — the adapter registered on the **live**
+Phase-0 router and an attestor-signed intent filled `100 USDC → tUNIV2` through a
+Uniswap-V2 pool (a `MockUniswapV2` stand-in, since our faucet Stock Tokens have no
+real V2 pairs on testnet). The script asserts the on-chain fill **exactly equals**
+the off-chain V2 quote:
+
+| Contract | Address |
+|---|---|
+| UniswapV2Adapter | `0x8f929a410408d18b04da787ea596afbdbc4e0e55` |
+| venue key | `keccak256("UNISWAP_V2")` |
+| Fill tx | [`0x93b2f143…b80e`](https://explorer.testnet.chain.robinhood.com/tx/0x93b2f14318b15176eaafeb35785ff7f82deb5a42f1e973b9d4beb5ebf5b1b80e) — `got == expOut`, `got >= minOut` |
+
+Run: `forge script script/ProveUniV2.s.sol --rpc-url rh_testnet --broadcast --slow`.
+
+The best-execution router treats a V2 venue like any other — it quotes the pair's
+`getReserves()` with the exact Uniswap `getAmountOut` math (bit-identical to the
+on-chain fill) and can route or split across constant-product **and** V2 venues in
+the same order. A market lists a V2 venue by adding to `markets.json`:
+
+```jsonc
+{ "venue": "UNISWAP_V2", "pool": "<pair addr>", "kind": "univ2",
+  "router": "<v2 router addr>", "feeBps": 30, "label": "Uniswap V2" }
+```
+
+**Mainnet wiring** (once, per chain): deploy the adapter with the real router(s)
+whitelisted, `router.setVenue(keccak256("UNISWAP_V2"), adapter, false)`, and point
+each market's `univ2` venue at the real pair — no co-pilot code changes.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the
