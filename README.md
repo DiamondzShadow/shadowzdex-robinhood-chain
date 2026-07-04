@@ -236,6 +236,35 @@ attestor-signed fills, each booked to the tax ledger. The `--dry` rebalance
 correctly reads a TSLA-overweight book (77% → target 40%) and lays out the
 sell-TSLA / buy-AMD / buy-AMZN plan.
 
+### DCA keeper — recurring buys (`copilot/dca.mjs`)
+
+Standing *"buy $X of SYM every N"* orders, fired through the same best-execution
+engine — so every occurrence is a full best-ex buy (multi-venue + split + oracle
+guard), booked to the tax ledger. Schedules live in MongoDB (`rh_dca_schedules`
++ an `rh_dca_runs` audit log); the keeper just decides *when*.
+
+```bash
+node copilot/dca.mjs add TSLA 50 1w --max 12 --budget 600   # $50/week, 12 runs, $600 cap
+node copilot/dca.mjs add-nl "put $10 into AMD every 2 days"
+node copilot/dca.mjs list
+node copilot/dca.mjs run                      # fire everything due once (cron/Temporal-friendly)
+node copilot/dca.mjs run --watch --tick 15    # local loop until no active schedules
+```
+
+Each schedule carries optional `--max` (run count) and `--budget` (total USD) caps
+and auto-deactivates when either is hit; a failed occurrence (e.g. the oracle guard
+refusing an off-band pool) is logged and retried on the next tick rather than
+skipped. **Proven live** — a `$3 TSLA every 15s, max 2` schedule fired two best-ex
+buys ~15s apart (routed to different pools), booked both to the ledger, then
+completed (`2/2 runs · $6.00 spent`) and the keeper exited.
+
+> **Scheduling & custody.** `run` is one-shot — drive it from cron / Temporal / the
+> existing shadowz-keeperz relayer on your cadence rather than a bespoke long-lived
+> process (`--watch` is a local-demo convenience). Custody is the single-user model
+> (keeper signs with `DEPLOYER_PK`); for multi-user non-custodial DCA the
+> `IntentRouter` already ships `executeSwapWithPermit2Keeper` — a relayer submits
+> while the user's Permit2 witness binds the pull to one intent.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the
