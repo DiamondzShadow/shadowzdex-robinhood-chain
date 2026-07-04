@@ -97,13 +97,15 @@ async function main() {
     if (only && sym !== only) continue;
     const { raw: oRaw, dec: oDec } = await oracleUsd(pub, mkt.feed);
     const oracle = Number(formatUnits(oRaw, oDec));
+    if (oracle <= 0) { console.log(`⚠️ ${sym} oracle price invalid (${oracle}) — skipping`); continue; }
     for (const v of mkt.venues) {
       const [rU, rS] = await Promise.all([
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveUsdc" }),
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveStock" }),
       ]);
       // price (USD/share) = rU*1e12 / rS   (USDC 6-dec, stock 18-dec)
-      const priceCur = Number(rU) * 1e12 / Number(rS);
+      // divide before scaling to avoid Number overflow past 2^53
+      const priceCur = (Number(rU) / Number(rS)) * 1e12;
       const devBps = Math.round(Math.abs(priceCur - oracle) / oracle * 10000);
       if (devBps <= 200) { console.log(`✓ ${sym}/${v.label} $${priceCur.toFixed(2)} (dev ${devBps}bps) — in band, skip`); continue; }
 

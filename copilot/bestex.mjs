@@ -26,6 +26,7 @@ const univ2Abi = [
 function quoteLocal(res, tokenIn, amountIn) {
   if (amountIn <= 0n) return 0n;
   const [rIn, rOut] = tokenIn === "usdc" ? [res.rUsdc, res.rStock] : [res.rStock, res.rUsdc];
+  if (rIn <= 0n || rOut <= 0n) return 0n; // unseeded / empty pool
   const amtF = (amountIn * (10_000n - res.feeBps)) / 10_000n;
   const out = (rOut * amtF) / (rIn + amtF);
   return out < rOut ? out : 0n; // never drain the pool
@@ -90,6 +91,7 @@ export function quoteAll(venues, side, amountIn) {
 // small slice to whichever venue currently offers the best marginal rate reaches
 // the optimum. STEPS controls granularity (slice = amountIn / STEPS).
 export function optimalSplit(venues, side, amountIn, steps = 200) {
+  if (!venues || venues.length === 0) return { allocations: [], totalOut: 0n };
   if (venues.length === 1) {
     const only = { ...venues[0], amountIn, out: quoteLocal(venues[0], side, amountIn) };
     return { allocations: [only], totalOut: only.out };
@@ -124,7 +126,8 @@ export function optimalSplit(venues, side, amountIn, steps = 200) {
 
 // Spot mid-price of a venue in USD/share (USDC 6-dec, stock 18-dec).
 export function venueMid(v) {
-  return v.rStock > 0n ? (Number(v.rUsdc) * 1e12) / Number(v.rStock) : 0;
+  // divide before scaling to avoid Number overflow (Number(rUsdc)*1e12 can exceed 2^53)
+  return v.rStock > 0n ? (Number(v.rUsdc) / Number(v.rStock)) * 1e12 : 0;
 }
 function devBps(mid, oracle) {
   return oracle > 0 ? Math.round((Math.abs(mid - oracle) / oracle) * 10_000) : 0;

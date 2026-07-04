@@ -37,11 +37,10 @@ contract ProveUniV2 {
     event UniV2Proof(address adapter, address pool, address stock, uint256 usdcIn, uint256 expOut, uint256 got);
 
     function run() external {
-        uint256 deployerPk = vm.envOr(
-            "DEPLOYER_PK",
-            uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80)
-        );
-        uint256 attestorPk = vm.envOr("ATTESTOR_PK", uint256(0xA11CE00000000000000000000000000000000000000000000000000000000001));
+        uint256 deployerPk = vm.envOr("DEPLOYER_PK", uint256(0));
+        require(deployerPk != 0, "DEPLOYER_PK env var is required");
+        uint256 attestorPk = vm.envOr("ATTESTOR_PK", uint256(0));
+        require(attestorPk != 0, "ATTESTOR_PK env var is required");
         address me = vm.addr(deployerPk);
 
         vm.startBroadcast(deployerPk);

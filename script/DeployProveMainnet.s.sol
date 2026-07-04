@@ -62,7 +62,8 @@ contract DeployProveMainnet {
     error DeployerNotAdmin(address router, address deployer);
 
     function run() external {
-        uint256 pk = vm.envOr("DEPLOYER_PK", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80));
+        uint256 pk = vm.envOr("DEPLOYER_PK", uint256(0));
+        require(pk != 0, "DEPLOYER_PK env var is required");
         address me = vm.addr(pk);
 
         address admin = vm.envAddress("ADMIN");

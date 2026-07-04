@@ -16,7 +16,7 @@ import {
 } from "viem";
 import { privateKeyToAccount, sign, serializeSignature } from "viem/accounts";
 import * as ledger from "./ledger.mjs";
-import { loadVenues, quoteAll, decide, adapterDataFor } from "./bestex.mjs";
+import { loadVenues, decide, adapterDataFor } from "./bestex.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 export const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
@@ -122,15 +122,16 @@ export async function doSwap(ctx, { mkt, sym, tokenIn, tokenOut, amountIn }, opt
   const log = opts.quiet ? () => {} : console.log;
   const side = tokenIn.toLowerCase() === cfg.usdc.toLowerCase() ? "usdc" : "stock";
   const oracle = await oracleUsd(ctx.pub, mkt);
-  const venues = await loadVenues(ctx.pub, mkt.venues, cfg.usdc);
+  // fall back to the legacy top-level pool/venue if a market has no venues[] array
+  const venuesCfg = mkt.venues ?? [{ venue: mkt.venue, pool: mkt.pool, label: mkt.name }];
+  const venues = await loadVenues(ctx.pub, venuesCfg, cfg.usdc);
   const maxDev = Number(env.ORACLE_MAX_DEV_BPS ?? cfg.oracleMaxDevBps ?? 500);
   const d = decide(venues, side, amountIn, { oracle, maxDevBps: maxDev });
 
   const fmtOut = (q) => (side === "usdc" ? `${Number(formatUnits(q, 18)).toFixed(6)} ${sym}` : usd(Number(formatUnits(q, 6))));
   log(`\n🔀 Best-execution — ${sym} · Chainlink ${usd(oracle)} · ${side === "usdc" ? "buy" : "sell"} across ${venues.length} venue(s):`);
-  for (const v of d.eligible) {
-    const q = quoteAll([v], side, amountIn)[0].out;
-    log(`   • ${v.label.padEnd(22)} mid ${usd(v.mid)} (${v.devBps}bps) → ${fmtOut(q)}`);
+  for (const v of d.table) { // d.table is the eligible venues with quotes precomputed
+    log(`   • ${v.label.padEnd(22)} mid ${usd(v.mid)} (${v.devBps}bps) → ${fmtOut(v.out)}`);
   }
   for (const v of d.excluded) log(`   ✗ ${v.label.padEnd(22)} mid ${usd(v.mid)} (${v.devBps}bps) — 🔒 off-band, skipped`);
   if (!d.best) throw new Error(`attestor REFUSES — every ${sym} venue deviates > ${maxDev}bps from the Chainlink oracle`);
@@ -148,7 +149,7 @@ export async function doSwap(ctx, { mkt, sym, tokenIn, tokenOut, amountIn }, opt
   let totalOut = 0n; const hashes = [];
   for (const leg of plan) {
     const src = venues.find((v) => v.key === leg.key);
-    const expLeg = quoteAll([src], side, leg.amountIn)[0].out;
+    const expLeg = leg.out; // precomputed by decide()/optimalSplit for this leg's amountIn
     const adapterData = adapterDataFor(src, tokenIn, tokenOut, encodeAbiParameters);
     const { out, hash } = await execLeg(ctx, { venueName: leg.key, tokenIn, tokenOut, amountIn: leg.amountIn, minOut: (expLeg * 98n) / 100n, adapterData });
     totalOut += out; hashes.push(hash);

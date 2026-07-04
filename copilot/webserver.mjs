@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { createPublicClient, http as vhttp, defineChain, keccak256, toHex, formatUnits, parseUnits, encodeAbiParameters } from "viem";
 import { sign, serializeSignature } from "viem/accounts";
 import * as ledger from "./ledger.mjs";
-import { loadVenues, quoteAll, decide, adapterDataFor } from "./bestex.mjs";
+import { loadVenues, decide, adapterDataFor } from "./bestex.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
@@ -103,15 +103,16 @@ async function handleIntent(body) {
   // Best-execution: quote every venue that lists the symbol, drop off-band ones,
   // route the order to the best eligible venue. (The CLI co-pilot additionally
   // SPLITS across venues; the browser keeps a single-submit UX.)
-  const venues = await loadVenues(pub, mkt.venues, cfg.usdc);
+  const venuesCfg = mkt.venues ?? [{ venue: mkt.venue, pool: mkt.pool, label: mkt.name }];
+  const venues = await loadVenues(pub, venuesCfg, cfg.usdc);
   const d = decide(venues, "usdc", amountIn, { oracle, maxDevBps: maxDev });
-  const routing = d.eligible
-    .map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: quoteAll([v], "usdc", amountIn)[0].out.toString() }))
+  const routing = d.table // eligible venues with quotes precomputed
+    .map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: v.out.toString() }))
     .concat(d.excluded.map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: null, offBand: true })));
   if (!d.best) return { status: 200, body: { kind: "rejected", symbol: sym, oracle, maxDev, routing, message: `Attestor refuses: every ${sym} venue deviates > ${maxDev}bps from the Chainlink oracle.` } };
 
   const bestSrc = venues.find((v) => v.key === d.best.key);
-  const expOut = quoteAll([bestSrc], "usdc", amountIn)[0].out;
+  const expOut = d.best.out;
   const adapterData = adapterDataFor(bestSrc, cfg.usdc, mkt.stock, encodeAbiParameters);
   const intent = {
     user: wallet, tokenIn: cfg.usdc, tokenOut: mkt.stock, amountIn, minOut: (expOut * 98n) / 100n,
