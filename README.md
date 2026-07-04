@@ -150,6 +150,13 @@ the same order. A market lists a V2 venue by adding to `markets.json`:
 `rpc.mainnet.chain.robinhood.com`, chain `4663`). Every address comes from env
 (`.env.mainnet.example`); both scripts validate on-chain before any write.
 
+> **One command:** `./deploy-mainnet.sh` runs all three steps below — it
+> preflights (chain id, deployer balance, Safe has code), **dry-runs each step on
+> a mainnet fork**, and only broadcasts after you type `yes`. It captures the
+> router address from step 1 into `.env.mainnet` for step 2 automatically. Run a
+> single step with `./deploy-mainnet.sh router|venues|renounce`. The manual
+> `forge` commands below are the equivalent.
+
 1. **Router** — `script/DeployProveMainnet.s.sol` deploys the production
    `IntentRouter`, authorizes the CRE attestor, sets the fee policy, and grants
    every admin role to the mainnet Safe (`ADMIN` must have code; a Gnosis Safe's

@@ -58,6 +58,8 @@ contract DeployProveMainnet {
 
     error ZeroAttestor();
     error AdminNotContract(address admin);
+    error RouterNotContract(address router);
+    error DeployerNotAdmin(address router, address deployer);
 
     function run() external {
         uint256 pk = vm.envOr("DEPLOYER_PK", uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80));
@@ -70,6 +72,9 @@ contract DeployProveMainnet {
         uint256 passDiscountBps = vm.envOr("PASS_DISCOUNT_BPS", uint256(0));
         address feeTreasury = vm.envOr("FEE_TREASURY", admin);
         bool renounce = vm.envOr("RENOUNCE_DEPLOYER", false);
+        // Set INTENT_ROUTER to re-run against an already-deployed router (step 3:
+        // renounce) instead of deploying a fresh one. Unset → deploy new (step 1).
+        address existing = vm.envOr("INTENT_ROUTER", address(0));
 
         // ── Validate before deploying ──
         if (attestor == address(0)) revert ZeroAttestor();
@@ -77,8 +82,16 @@ contract DeployProveMainnet {
 
         vm.startBroadcast(pk);
 
-        // 1. Router — deployer is temporary admin so this script can configure it.
-        IntentRouter router = new IntentRouter(me, permit2);
+        // 1. Router — attach to an existing one, or deploy fresh (deployer is the
+        //    temporary admin so this script can configure it, then hands to the Safe).
+        IntentRouter router;
+        if (existing != address(0)) {
+            if (existing.code.length == 0) revert RouterNotContract(existing);
+            router = IntentRouter(existing);
+            if (!router.hasRole(router.DEFAULT_ADMIN_ROLE(), me)) revert DeployerNotAdmin(existing, me);
+        } else {
+            router = new IntentRouter(me, permit2);
+        }
         emit RouterDeployed(address(router), admin, permit2, block.chainid);
 
         // 2. Authorize the CRE attestor as an intent signer.
