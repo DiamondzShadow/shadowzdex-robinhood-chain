@@ -216,13 +216,18 @@ routing, optimal split, the Chainlink oracle guard, and — on mainnet — the
 - **Basket buy** — spread a dollar amount across the target weights, best-ex each leg.
 - **Rebalance** — mark holdings to Chainlink, compute the drift from target
   weights, and generate the sell/buy legs to restore them (a dust threshold skips
-  tiny trades; overweights sell first to free USDC, then underweights buy).
+  tiny trades; overweights sell first to free USDC, then underweights buy). By
+  default it only touches the basket's symbols — it never surprise-sells anything
+  else. Pass **`--liquidate`** to also sell down any tradeable holding *outside*
+  the basket (target weight 0) and fold its value into the total so it funds the
+  basket buys.
 - **Natural language** + a `--dry` preview that prints the plan without trading.
 
 ```bash
 node copilot/basket.mjs rebalance TECH --dry          # preview the drift + trade plan
 node copilot/basket.mjs buy EQUAL 15                   # buy $5 each, best-ex per leg
-node copilot/basket.mjs nl "keep me 40/30/30 across TSLA AMD AMZN"
+node copilot/basket.mjs rebalance --weights "TSLA=60,AMD=40" --liquidate  # sell AMZN into the target
+node copilot/basket.mjs nl "move my whole portfolio into the tech basket"
 ```
 
 **Proven live** — `buy EQUAL 15` opened the three-symbol basket, and **every leg

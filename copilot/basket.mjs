@@ -124,42 +124,59 @@ async function cmdBuy(ctx, name, dollars, dry) {
   console.log(`\n✅ bought the ${name.toUpperCase()} basket — ${usd(spent)} across ${legs.length} positions.`);
 }
 
-async function cmdRebalance(ctx, name, weights, dry) {
-  const w = weights || getBasket(name);
-  const syms = Object.keys(w);
-  const label = name ? name.toUpperCase() : "target";
-  console.log(`\n⚖️  Rebalance to ${label} — ${fmtWeights(w)}`);
+const MIN_TRADE = 1; // don't bother trading sub-$1 amounts
 
-  const { marks, total } = await markValues(ctx, syms);
+async function cmdRebalance(ctx, name, weights, dry, liquidate) {
+  const w = weights || getBasket(name);
+  const basketSyms = Object.keys(w);
+  const label = name ? name.toUpperCase() : "target";
+  console.log(`\n⚖️  Rebalance to ${label} — ${fmtWeights(w)}${liquidate ? " · liquidating non-basket holdings" : ""}`);
+
+  // Universe = basket symbols, plus (with --liquidate) any other tradeable symbol
+  // currently held. Non-basket holds get target weight 0 → sold fully, and their
+  // value counts toward the total so it funds the basket buys.
+  const universe = [...basketSyms];
+  if (liquidate) {
+    const { positions } = await ledger.report(ctx.user.address);
+    for (const sym of symbols()) {
+      if (!universe.includes(sym) && (positions[sym]?.qty ?? 0) > 0) universe.push(sym);
+    }
+  }
+
+  const { marks, total } = await markValues(ctx, universe);
   if (total < 1) {
     console.log(`   portfolio holds ${usd(total)} of these symbols — nothing to rebalance. Use "buy ${label} <usd>" to open the basket.`);
     return;
   }
-  // Drift + trade plan. Threshold avoids dust trades.
-  const threshold = Math.max(1, 0.02 * total);
-  console.log(`   portfolio value (these symbols): ${usd(total)} · trade threshold ${usd(threshold)}`);
-  const sells = [], buys = [];
-  for (const sym of syms) {
+  const threshold = Math.max(MIN_TRADE, 0.02 * total);
+  console.log(`   portfolio value: ${usd(total)} · rebalance threshold ${usd(threshold)}`);
+  const sells = [], buys = []; // sells: [sym, dollars, all]
+  for (const sym of universe) {
     const cur = marks[sym].value;
-    const target = total * w[sym];
+    const inBasket = basketSyms.includes(sym);
+    const target = inBasket ? total * w[sym] : 0;
     const delta = target - cur;
     const curPct = total > 0 ? (cur / total) * 100 : 0;
-    const tag = delta > threshold ? "BUY" : delta < -threshold ? "SELL" : "hold";
-    console.log(`   ${sym.padEnd(5)} now ${usd(cur)} (${curPct.toFixed(1)}%) → target ${usd(target)} (${(w[sym] * 100).toFixed(1)}%) · Δ ${delta >= 0 ? "+" : ""}${usd(delta)}  ${tag}`);
-    if (delta > threshold) buys.push([sym, round2(delta)]);
-    else if (delta < -threshold) sells.push([sym, round2(-delta)]);
+    const targetPct = inBasket ? w[sym] * 100 : 0;
+    // Non-basket holdings are sold in full (target 0); basket legs use the threshold.
+    const sellFull = !inBasket && cur >= MIN_TRADE;
+    const tag = sellFull ? "SELL-ALL" : delta > threshold ? "BUY" : delta < -threshold ? "SELL" : "hold";
+    console.log(`   ${sym.padEnd(5)} now ${usd(cur)} (${curPct.toFixed(1)}%) → target ${usd(target)} (${targetPct.toFixed(1)}%)${inBasket ? "" : " [non-basket]"} · Δ ${delta >= 0 ? "+" : ""}${usd(delta)}  ${tag}`);
+    if (sellFull) sells.push([sym, cur, true]);
+    else if (inBasket && delta > threshold) buys.push([sym, round2(delta)]);
+    else if (inBasket && delta < -threshold) sells.push([sym, round2(-delta), false]);
   }
   if (!sells.length && !buys.length) { console.log(`\n✅ already within ${usd(threshold)} of target — no trades needed.`); return; }
   if (dry) { console.log(`\n   (dry-run — plan: ${sells.length} sell(s), ${buys.length} buy(s); no trades executed)`); return; }
 
-  // Sell overweights first (frees USDC), then buy underweights.
-  for (const [sym, d] of sells) await sell(ctx, sym, { dollars: d });
+  // Sell overweights + non-basket holdings first (frees USDC), then buy underweights.
+  for (const [sym, d, all] of sells) await sell(ctx, sym, all ? { all: true } : { dollars: d });
   for (const [sym, d] of buys) await buy(ctx, sym, d);
   console.log(`\n✅ rebalanced ${label}: ${sells.length} sell(s), ${buys.length} buy(s).`);
 }
 
 // Natural-language front-end → routes to the commands above.
-async function cmdNl(ctx, instruction, dry) {
+async function cmdNl(ctx, instruction, dry, liquidate) {
   const syms = symbols().join(", ");
   const names = Object.keys(allBaskets()).join(", ");
   const r = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
@@ -169,27 +186,30 @@ async function cmdNl(ctx, instruction, dry) {
       messages: [
         { role: "system", content:
           `You turn a portfolio instruction into JSON for a basket agent. Symbols: ${syms}. Known baskets: ${names}. ` +
-          `Respond ONLY with JSON: {"action":"buy"|"rebalance","basket":<name or null>,"usd":<dollars or null>,"weights":<"SYM=pct,..." or null>}. ` +
-          `"buy $150 of the tech basket"→{"action":"buy","basket":"TECH","usd":150,"weights":null}. ` +
-          `"rebalance me to equal weight"→{"action":"rebalance","basket":"EQUAL","usd":null,"weights":null}. ` +
-          `"keep me 40/30/30 across TSLA AMD AMZN"→{"action":"rebalance","basket":null,"usd":null,"weights":"TSLA=40,AMD=30,AMZN=30"}.` },
+          `Respond ONLY with JSON: {"action":"buy"|"rebalance","basket":<name or null>,"usd":<dollars or null>,"weights":<"SYM=pct,..." or null>,"liquidate":<true if they want to sell holdings OUTSIDE the target too, e.g. "sell everything else"/"move all into">}. ` +
+          `"buy $150 of the tech basket"→{"action":"buy","basket":"TECH","usd":150,"weights":null,"liquidate":false}. ` +
+          `"rebalance me to equal weight"→{"action":"rebalance","basket":"EQUAL","usd":null,"weights":null,"liquidate":false}. ` +
+          `"move my whole portfolio into the tech basket"→{"action":"rebalance","basket":"TECH","usd":null,"weights":null,"liquidate":true}. ` +
+          `"keep me 40/30/30 across TSLA AMD AMZN"→{"action":"rebalance","basket":null,"usd":null,"weights":"TSLA=40,AMD=30,AMZN=30","liquidate":false}.` },
         { role: "user", content: instruction },
       ],
     }),
   });
   if (!r.ok) throw new Error(`Fireworks ${r.status}`);
   const a = JSON.parse((await r.json()).choices[0].message.content);
-  console.log(`🤖 ${a.action}${a.basket ? " " + a.basket : ""}${a.usd ? " $" + a.usd : ""}${a.weights ? " [" + a.weights + "]" : ""}`);
+  const liq = liquidate || !!a.liquidate;
+  console.log(`🤖 ${a.action}${a.basket ? " " + a.basket : ""}${a.usd ? " $" + a.usd : ""}${a.weights ? " [" + a.weights + "]" : ""}${liq ? " (liquidate rest)" : ""}`);
   if (a.action === "buy") return cmdBuy(ctx, a.basket, a.usd, dry);
-  if (a.action === "rebalance") return cmdRebalance(ctx, a.basket, a.weights ? parseWeights(a.weights) : null, dry);
+  if (a.action === "rebalance") return cmdRebalance(ctx, a.basket, a.weights ? parseWeights(a.weights) : null, dry, liq);
   throw new Error(`unsupported instruction`);
 }
 
 async function main() {
   const argv = process.argv.slice(2);
   const dry = argv.includes("--dry");
-  const [cmd, ...rest] = argv.filter((a) => a !== "--dry");
-  const usage = 'usage: basket.mjs list | show <name> | define <name> "SYM=pct,..." | buy <name> <usd> | rebalance <name> | rebalance --weights "SYM=pct,..." | nl "..."  [--dry]';
+  const liquidate = argv.includes("--liquidate");
+  const [cmd, ...rest] = argv.filter((a) => a !== "--dry" && a !== "--liquidate");
+  const usage = 'usage: basket.mjs list | show <name> | define <name> "SYM=pct,..." | buy <name> <usd> | rebalance <name> | rebalance --weights "SYM=pct,..." | nl "..."  [--dry] [--liquidate]';
   if (!cmd) { console.error(usage); process.exit(1); }
 
   // Read-only commands need no chain/keys.
@@ -201,9 +221,9 @@ async function main() {
   try {
     if (cmd === "buy") await cmdBuy(ctx, rest[0], rest[1], dry);
     else if (cmd === "rebalance") {
-      if (rest[0] === "--weights") await cmdRebalance(ctx, null, parseWeights(rest.slice(1).join(" ")), dry);
-      else await cmdRebalance(ctx, rest[0] || die("rebalance <name>"), null, dry);
-    } else if (cmd === "nl") await cmdNl(ctx, rest.join(" "), dry);
+      if (rest[0] === "--weights") await cmdRebalance(ctx, null, parseWeights(rest.slice(1).join(" ")), dry, liquidate);
+      else await cmdRebalance(ctx, rest[0] || die("rebalance <name>"), null, dry, liquidate);
+    } else if (cmd === "nl") await cmdNl(ctx, rest.join(" "), dry, liquidate);
     else throw new Error(usage);
   } finally {
     await ledger.close();
