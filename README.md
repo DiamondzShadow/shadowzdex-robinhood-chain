@@ -146,10 +146,32 @@ the same order. A market lists a V2 venue by adding to `markets.json`:
   "router": "<v2 router addr>", "feeBps": 30, "label": "Uniswap V2" }
 ```
 
-**Mainnet wiring** — `script/DeployMainnetUniV2.s.sol` does it in one command
-against the live mainnet router (`rh_mainnet` = `rpc.mainnet.chain.robinhood.com`,
-chain `4663`). Every address comes from env (`.env.mainnet.example`) — nothing is
-hardcoded — and is **validated on-chain before any write**:
+**Mainnet deploy — full stack, in sequence** (`rh_mainnet` =
+`rpc.mainnet.chain.robinhood.com`, chain `4663`). Every address comes from env
+(`.env.mainnet.example`); both scripts validate on-chain before any write.
+
+1. **Router** — `script/DeployProveMainnet.s.sol` deploys the production
+   `IntentRouter`, authorizes the CRE attestor, sets the fee policy, and grants
+   every admin role to the mainnet Safe (`ADMIN` must have code; a Gnosis Safe's
+   `getThreshold()` is sanity-checked). `PERMIT2` defaults to the canonical
+   `0x0000…78BA3` — **verified deployed on RH mainnet**, so the Permit2 path works
+   out of the box. Keep `RENOUNCE_DEPLOYER=false` so step 2 can use the deployer's
+   `CONFIG_ROLE`; the run asserts the attestor is registered and the Safe holds
+   admin. Copy the emitted router address into `INTENT_ROUTER`.
+2. **Adapter + venues** — `script/DeployMainnetUniV2.s.sol` (below).
+3. **Renounce** — re-run step 1 with `RENOUNCE_DEPLOYER=true` (or renounce via the
+   Safe) to drop the deployer's roles once wiring is done. The run asserts the
+   deployer no longer holds admin.
+
+```bash
+cp .env.mainnet.example .env.mainnet    # fill in verified mainnet addresses
+forge script script/DeployProveMainnet.s.sol --fork-url rh_mainnet -vvvv          # dry-run step 1
+forge script script/DeployProveMainnet.s.sol --rpc-url rh_mainnet --broadcast --slow
+```
+
+**Step 2 — wire the Uniswap V2 venue** with `script/DeployMainnetUniV2.s.sol`
+against the router from step 1. Every address is **validated on-chain before any
+write**:
 
 - `INTENT_ROUTER` must have code, and the broadcaster must hold its `CONFIG_ROLE`
   (fails fast with `MissingConfigRole` instead of a bare `setVenue` revert);
@@ -164,8 +186,7 @@ adapter; the pool is chosen by `adapterData`. Then point each market's `univ2`
 venue in `markets.json` at the real pair — no co-pilot code changes.
 
 ```bash
-cp .env.mainnet.example .env.mainnet    # fill in verified mainnet addresses
-forge script script/DeployMainnetUniV2.s.sol --fork-url rh_mainnet -vvvv        # dry-run
+forge script script/DeployMainnetUniV2.s.sol --fork-url rh_mainnet -vvvv        # dry-run step 2
 forge script script/DeployMainnetUniV2.s.sol --rpc-url rh_mainnet --broadcast --slow
 ```
 
