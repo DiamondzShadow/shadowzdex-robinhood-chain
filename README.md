@@ -202,6 +202,35 @@ forge script script/DeployMainnetUniV2.s.sol --rpc-url rh_mainnet --broadcast --
 > the mainnet explorer, Uniswap's deployment docs, or `chain-developers-group@robinhood.com`,
 > and the script's on-chain validation guarantees you can't wire a wrong one.
 
+### Portfolio agent — baskets + rebalancing (`copilot/basket.mjs`)
+
+The co-pilot's trade core is extracted into `copilot/engine.mjs` (best-ex swap +
+tax-lot recording), and the **portfolio agent** builds on it: a basket buy or a
+rebalance is just *N best-execution legs*, so every one inherits multi-venue
+routing, optimal split, the Chainlink oracle guard, and — on mainnet — the
+`UniswapV2Adapter`.
+
+- **Baskets** — built-ins (`EQUAL`, `TECH`, `AICHIP`) over the tradeable symbols,
+  plus user-defined ones (`define TECH "TSLA=50,AMD=30,AMZN=20"`, persisted to a
+  gitignored file). Weights normalise automatically.
+- **Basket buy** — spread a dollar amount across the target weights, best-ex each leg.
+- **Rebalance** — mark holdings to Chainlink, compute the drift from target
+  weights, and generate the sell/buy legs to restore them (a dust threshold skips
+  tiny trades; overweights sell first to free USDC, then underweights buy).
+- **Natural language** + a `--dry` preview that prints the plan without trading.
+
+```bash
+node copilot/basket.mjs rebalance TECH --dry          # preview the drift + trade plan
+node copilot/basket.mjs buy EQUAL 15                   # buy $5 each, best-ex per leg
+node copilot/basket.mjs nl "keep me 40/30/30 across TSLA AMD AMZN"
+```
+
+**Proven live** — `buy EQUAL 15` opened the three-symbol basket, and **every leg
+split across both venues** (+7 / +22 / +28 bps vs best-single) as six
+attestor-signed fills, each booked to the tax ledger. The `--dry` rebalance
+correctly reads a TSLA-overweight book (77% → target 40%) and lays out the
+sell-TSLA / buy-AMD / buy-AMZN plan.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the

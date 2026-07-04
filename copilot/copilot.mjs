@@ -1,85 +1,26 @@
 #!/usr/bin/env node
 // ShadowzDex tax-aware co-pilot — natural language → oracle-checked, attestor-signed
-// trades on Robinhood Chain, with a MongoDB tax-lot ledger underneath.
+// best-execution trades on Robinhood Chain, with a MongoDB tax-lot ledger underneath.
+// The trade engine lives in engine.mjs; this is the natural-language CLI over it.
 //
 //   node copilot/copilot.mjs "buy $100 of TSLA"
 //   node copilot/copilot.mjs "sell all my AMD"
 //   node copilot/copilot.mjs "harvest my losses"
 //   node copilot/copilot.mjs "show my taxes"
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import {
-  createPublicClient, createWalletClient, http, defineChain,
-  keccak256, toHex, maxUint256, formatUnits, parseUnits, encodeAbiParameters,
-} from "viem";
-import { privateKeyToAccount, sign, serializeSignature } from "viem/accounts";
-import * as ledger from "./ledger.mjs";
-import { loadVenues, quoteAll, decide, adapterDataFor } from "./bestex.mjs";
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
-
-function loadEnv() {
-  const out = {};
-  for (const p of [join(__dir, "..", ".env"), join(process.env.HOME, ".fireworks.env")]) {
-    try {
-      for (const line of readFileSync(p, "utf8").split("\n")) {
-        const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-        if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, "");
-      }
-    } catch {}
-  }
-  return { ...out, ...process.env };
-}
-const env = loadEnv();
-const need = (k) => { if (!env[k]) { console.error(`missing ${k}`); process.exit(1); } return env[k]; };
-const norm = (k) => (k.startsWith("0x") ? k : `0x${k}`);
-
-const chain = defineChain({
-  id: cfg.chainId, name: "Robinhood Chain Testnet",
-  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: [cfg.rpc] } },
-});
-
-const SWAP_INTENT = { type: "tuple", components: [
-  { name: "user", type: "address" }, { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
-  { name: "amountIn", type: "uint256" }, { name: "minOut", type: "uint256" }, { name: "deadline", type: "uint256" },
-  { name: "venue", type: "bytes32" }, { name: "nonce", type: "uint256" }, { name: "extra", type: "bytes" },
-  { name: "bridgeFeeAmount", type: "uint256" }, { name: "sdmTier", type: "uint8" } ] };
-const routerAbi = [
-  { name: "hashIntent", type: "function", stateMutability: "view", inputs: [SWAP_INTENT], outputs: [{ type: "bytes32" }] },
-  { name: "executeSwap", type: "function", stateMutability: "nonpayable",
-    inputs: [SWAP_INTENT, { name: "signature", type: "bytes" }, { name: "adapterData", type: "bytes" }], outputs: [{ type: "uint256" }] },
-];
-const poolAbi = [
-  { name: "quote", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "uint256" }] },
-  { name: "reserveUsdc", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-  { name: "reserveStock", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-];
-const feedAbi = [
-  { name: "latestRoundData", type: "function", stateMutability: "view", inputs: [], outputs: [
-    { type: "uint80" }, { type: "int256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint80" }] },
-  { name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
-];
-const erc20Abi = [
-  { name: "allowance", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }] },
-  { name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] },
-  { name: "balanceOf", type: "function", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
-];
+import { need, usd, makeCtx, oracleUsd, buy, sell, ledger, symbols } from "./engine.mjs";
 
 // ── NL → structured action ──
 async function parse(instruction) {
-  const symbols = Object.keys(cfg.markets).join(", ");
+  const syms = symbols().join(", ");
   const body = {
     model: "accounts/fireworks/models/gpt-oss-120b", temperature: 0, max_tokens: 200,
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content:
         `You turn a spoken trading instruction into JSON for a tokenized-stock trading agent. ` +
-        `Tradeable symbols: ${symbols} (traded vs USDC). Respond ONLY with JSON: ` +
-        `{"action":"buy"|"sell"|"harvest"|"report","symbol":<one of ${symbols} or null>,"usd":<dollars or null>,"all":<true if they say "all"/"everything">}. ` +
+        `Tradeable symbols: ${syms} (traded vs USDC). Respond ONLY with JSON: ` +
+        `{"action":"buy"|"sell"|"harvest"|"report","symbol":<one of ${syms} or null>,"usd":<dollars or null>,"all":<true if they say "all"/"everything">}. ` +
         `"buy $100 of TSLA"→{"action":"buy","symbol":"TSLA","usd":100,"all":false}. ` +
         `"sell all my AMD"→{"action":"sell","symbol":"AMD","usd":null,"all":true}. ` +
         `"harvest my AMD losses"→{"action":"harvest","symbol":"AMD","usd":null,"all":false}. ` +
@@ -96,107 +37,6 @@ async function parse(instruction) {
   return JSON.parse((await r.json()).choices[0].message.content);
 }
 
-const usd = (n) => `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-async function oracleUsd(pub, mkt) {
-  const [rd, dec] = await Promise.all([
-    pub.readContract({ address: mkt.feed, abi: feedAbi, functionName: "latestRoundData" }),
-    pub.readContract({ address: mkt.feed, abi: feedAbi, functionName: "decimals" }),
-  ]);
-  return Number(formatUnits(rd[1], dec));
-}
-// Execute one attestor-signed leg through a specific venue. adapterData is empty
-// for constant-product pools and the encoded (router, path, feeOnTransfer) blob
-// for Uniswap V2 venues. Returns { out, hash }.
-async function execLeg(ctx, { venueName, tokenIn, tokenOut, amountIn, minOut, adapterData = "0x" }) {
-  const intent = {
-    user: ctx.user.address, tokenIn, tokenOut, amountIn, minOut,
-    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(venueName)),
-    nonce: BigInt("0x" + [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")),
-    extra: "0x", bridgeFeeAmount: 0n, sdmTier: 0,
-  };
-  const digest = await ctx.pub.readContract({ address: cfg.router, abi: routerAbi, functionName: "hashIntent", args: [intent] });
-  const sig = serializeSignature(await sign({ hash: digest, privateKey: ctx.attestorPk }));
-  const allow = await ctx.pub.readContract({ address: tokenIn, abi: erc20Abi, functionName: "allowance", args: [ctx.user.address, cfg.router] });
-  if (allow < amountIn) {
-    const h = await ctx.wallet.writeContract({ address: tokenIn, abi: erc20Abi, functionName: "approve", args: [cfg.router, maxUint256] });
-    await ctx.pub.waitForTransactionReceipt({ hash: h });
-  }
-  const before = await ctx.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: "balanceOf", args: [ctx.user.address] });
-  const hash = await ctx.wallet.writeContract({ address: cfg.router, abi: routerAbi, functionName: "executeSwap", args: [intent, sig, adapterData] });
-  await ctx.pub.waitForTransactionReceipt({ hash });
-  const after = await ctx.pub.readContract({ address: tokenOut, abi: erc20Abi, functionName: "balanceOf", args: [ctx.user.address] });
-  return { out: after - before, hash };
-}
-
-// Best-execution swap. Quotes every venue that lists the symbol, drops any that
-// deviate > maxDev from the Chainlink oracle (the attestor won't sign those),
-// then routes the whole order to the best single venue — or SPLITS it across
-// venues when that beats the best single fill. Each leg is its own oracle-checked,
-// attestor-signed intent. Returns { out (bigint total), hash (primary), hashes }.
-async function doSwap(ctx, { mkt, sym, tokenIn, tokenOut, amountIn }) {
-  const side = tokenIn.toLowerCase() === cfg.usdc.toLowerCase() ? "usdc" : "stock";
-  const oracle = await oracleUsd(ctx.pub, mkt);
-  const venues = await loadVenues(ctx.pub, mkt.venues, cfg.usdc);
-  const maxDev = Number(env.ORACLE_MAX_DEV_BPS ?? cfg.oracleMaxDevBps ?? 500);
-  const d = decide(venues, side, amountIn, { oracle, maxDevBps: maxDev });
-
-  const fmtOut = (q) => (side === "usdc" ? `${Number(formatUnits(q, 18)).toFixed(6)} ${sym}` : usd(Number(formatUnits(q, 6))));
-  console.log(`\n🔀 Best-execution — ${sym} · Chainlink ${usd(oracle)} · ${side === "usdc" ? "buy" : "sell"} across ${venues.length} venue(s):`);
-  for (const v of d.eligible) {
-    const q = quoteAll([v], side, amountIn)[0].out;
-    console.log(`   • ${v.label.padEnd(22)} mid ${usd(v.mid)} (${v.devBps}bps) → ${fmtOut(q)}`);
-  }
-  for (const v of d.excluded) console.log(`   ✗ ${v.label.padEnd(22)} mid ${usd(v.mid)} (${v.devBps}bps) — 🔒 off-band, skipped`);
-  if (!d.best) throw new Error(`attestor REFUSES — every ${sym} venue deviates > ${maxDev}bps from the Chainlink oracle`);
-
-  let plan;
-  const legFmt = (a) => (side === "usdc" ? usd(Number(formatUnits(a.amountIn, 6))) : `${Number(formatUnits(a.amountIn, 18)).toFixed(4)} ${sym}`);
-  if (d.useSplit) {
-    plan = d.split.allocations;
-    console.log(`   ⇒ SPLIT across ${plan.length} venues (+${d.improvementBps}bps vs best single): ${plan.map((a) => `${a.key}=${legFmt(a)}`).join(" + ")}`);
-  } else {
-    plan = [{ ...d.best, amountIn }];
-    console.log(`   ⇒ ROUTE all to ${d.best.label}${d.vsNaiveBps > 0 ? ` (+${d.vsNaiveBps}bps vs default ${sym}_MKT)` : " (best fill)"}`);
-  }
-
-  let totalOut = 0n; const hashes = [];
-  for (const leg of plan) {
-    const src = venues.find((v) => v.key === leg.key);
-    const expLeg = quoteAll([src], side, leg.amountIn)[0].out;
-    const adapterData = adapterDataFor(src, tokenIn, tokenOut, encodeAbiParameters);
-    const { out, hash } = await execLeg(ctx, { venueName: leg.key, tokenIn, tokenOut, amountIn: leg.amountIn, minOut: (expLeg * 98n) / 100n, adapterData });
-    totalOut += out; hashes.push(hash);
-  }
-  return { out: totalOut, hash: hashes[0], hashes };
-}
-
-async function buy(ctx, sym, dollars) {
-  const mkt = ctx.market(sym);
-  const amountIn = parseUnits(String(dollars), 6);
-  const { out, hash, hashes } = await doSwap(ctx, { mkt, sym, tokenIn: cfg.usdc, tokenOut: mkt.stock, amountIn });
-  const qty = Number(formatUnits(out, 18));
-  await ledger.recordBuy({ wallet: ctx.user.address, symbol: sym, qty, costUsd: dollars, priceUsd: dollars / qty, txHash: hash });
-  console.log(`✅ bought ${qty.toFixed(6)} ${sym} for ${usd(dollars)}  (basis ${usd(dollars / qty)}/sh)`);
-  for (const h of hashes) console.log(`   ${cfg.explorer}/tx/${h}`);
-}
-
-async function sell(ctx, sym, { dollars, all }) {
-  const mkt = ctx.market(sym);
-  const held = await ledger.positionQty(ctx.user.address, sym);
-  if (held <= 1e-9) { console.log(`ℹ️  no tracked ${sym} position to sell.`); return 0; }
-  const oracle = await oracleUsd(ctx.pub, mkt);
-  let qty = all ? held : Math.min(held, dollars / oracle);
-  const amountIn = parseUnits(qty.toFixed(12), 18);
-  const { out, hash, hashes } = await doSwap(ctx, { mkt, sym, tokenIn: mkt.stock, tokenOut: cfg.usdc, amountIn });
-  const proceeds = Number(formatUnits(out, 6));
-  const { realizedUsd } = await ledger.recordSell({ wallet: ctx.user.address, symbol: sym, qty, proceedsUsd: proceeds, priceUsd: proceeds / qty, txHash: hash });
-  const tag = realizedUsd >= 0 ? "gain" : "loss";
-  console.log(`✅ sold ${qty.toFixed(6)} ${sym} for ${usd(proceeds)} → realized ${tag} ${usd(realizedUsd)}`);
-  for (const h of hashes) console.log(`   ${cfg.explorer}/tx/${h}`);
-  return realizedUsd;
-}
-
 async function harvest(ctx, symOpt) {
   const { positions } = await ledger.report(ctx.user.address);
   const syms = symOpt ? [symOpt] : Object.keys(positions);
@@ -204,14 +44,13 @@ async function harvest(ctx, symOpt) {
   for (const sym of syms) {
     const p = positions[sym];
     if (!p || p.qty <= 1e-9) continue;
-    const mkt = ctx.market(sym);
-    const oracle = await oracleUsd(ctx.pub, mkt);
+    const oracle = await oracleUsd(ctx.pub, ctx.market(sym));
     const basisPerSh = p.costUsd / p.qty;
     const unreal = (oracle - basisPerSh) * p.qty;
     if (unreal < 0) {
       console.log(`\n📉 ${sym}: ${p.qty.toFixed(4)} sh · basis ${usd(basisPerSh)} · Chainlink ${usd(oracle)} · unrealized loss ${usd(unreal)} → harvesting`);
       const r = await sell(ctx, sym, { all: true });
-      harvested += r; total += 1;
+      harvested += r ? r.realizedUsd : 0; total += 1;
     } else {
       console.log(`🟢 ${sym}: up ${usd(unreal)} — skipping (a sale would realize a gain)`);
     }
@@ -246,17 +85,7 @@ async function main() {
   const a = await parse(instruction);
   console.log(`🤖 ${a.action}${a.symbol ? " " + a.symbol : ""}${a.usd ? " $" + a.usd : ""}${a.all ? " (all)" : ""}`);
 
-  const user = privateKeyToAccount(norm(need("DEPLOYER_PK")));
-  const attestorPk = norm(need("ATTESTOR_PK"));
-  const pub = createPublicClient({ chain, transport: http() });
-  const wallet = createWalletClient({ account: user, chain, transport: http() });
-  const market = (sym) => {
-    const m = cfg.markets[String(sym).toUpperCase()];
-    if (!m) throw new Error(`unsupported symbol ${sym}. Tradeable: ${Object.keys(cfg.markets).join(", ")}`);
-    return m;
-  };
-  const ctx = { pub, wallet, user, attestorPk, market };
-
+  const ctx = makeCtx();
   try {
     const sym = a.symbol && String(a.symbol).toUpperCase();
     if (a.action === "buy") await buy(ctx, sym, Number(a.usd));
