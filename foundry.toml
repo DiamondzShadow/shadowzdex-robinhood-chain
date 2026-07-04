@@ -11,3 +11,4 @@ remappings = ["@openzeppelin/=/home/di0zchain/ShadowzDex/node_modules/@openzeppe
 
 [rpc_endpoints]
 rh_testnet = "https://rpc.testnet.chain.robinhood.com"
+rh_mainnet = "https://rpc.mainnet.chain.robinhood.com"

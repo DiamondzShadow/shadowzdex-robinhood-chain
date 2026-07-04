@@ -93,10 +93,19 @@ async function send(text){
       for(const p of r.positions){ const unreal=p.valueUsd-p.basisUsd; line(a,`   ${p.symbol.padEnd(5)} ${p.qty.toFixed(4)} sh · basis ${usd(p.basisUsd)} · value ${usd(p.valueUsd)} · ${unreal>=0?"+":""}${usd(unreal)}`,unreal>=0?"ok":"bad"); }
       line(a,`Realized P/L (YTD): ${r.realizedYtd>=0?"+":""}${usd(r.realizedYtd)}`); return;
     }
-    if(r.kind==="rejected"){ line(a,`🔗 Chainlink ${r.symbol} ${usd(r.oracle)} · pool ${usd(r.spot)} · dev ${r.devBps}bps`,"info"); line(a,"🔒 "+r.message,"bad"); return; }
+    if(r.kind==="rejected"){
+      line(a,`🔗 Chainlink ${r.symbol} ${usd(r.oracle)} — best-execution across ${(r.routing||[]).length} venue(s):`,"info");
+      for(const v of (r.routing||[])) line(a,`   ${v.offBand?"🔒":"•"} ${v.label} · mid ${usd(v.mid)} (${v.devBps}bps)${v.offBand?" off-band":""}`,v.offBand?"bad":"info");
+      line(a,"🔒 "+r.message,"bad"); return;
+    }
     if(r.kind!=="buy"){ line(a,r.message||"unsupported"); return; }
-    // buy: user executes
+    // buy: best-execution routing, then user executes
     line(a,`🔗 Chainlink ${r.symbol} ${usd(r.oracle)} · quote ~${Number(formatUnits(BigInt(r.expOut),18)).toFixed(4)} ${r.symbol} for ${usd(r.dollars)}`,"info");
+    if(r.routing){
+      line(a,`🔀 Best-execution across ${r.routing.length} venue(s):`,"info");
+      for(const v of r.routing) line(a,`   ${v.offBand?"🔒":(v.venue===r.routedVenue?"→":"•")} ${v.label} · mid ${usd(v.mid)} (${v.devBps}bps)${v.out?` → ${(Number(v.out)/1e18).toFixed(6)} ${r.symbol}`:" off-band"}`, v.venue===r.routedVenue?"ok":(v.offBand?"bad":"info"));
+      line(a,`   ⇒ routed to ${r.routedLabel}${r.vsNaiveBps>0?` (+${r.vsNaiveBps}bps vs default ${r.symbol}_MKT)`:""}`,"ok");
+    }
     line(a,"✍️ attestor signed — approve in your wallet…");
     const it=r.intent, amountIn=BigInt(it.amountIn);
     const intent={user:it.user,tokenIn:it.tokenIn,tokenOut:it.tokenOut,amountIn,minOut:BigInt(it.minOut),deadline:BigInt(it.deadline),venue:it.venue,nonce:BigInt(it.nonce),extra:it.extra,bridgeFeeAmount:BigInt(it.bridgeFeeAmount),sdmTier:it.sdmTier};
@@ -104,7 +113,7 @@ async function send(text){
     if(allow<amountIn){ const h=await wallet.writeContract({address:r.usdc,abi:erc20,functionName:"approve",args:[r.router,maxUint256]}); await pub.waitForTransactionReceipt({hash:h}); }
     const before=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
     line(a,"🚀 executing…");
-    const hash=await wallet.writeContract({address:r.router,abi:routerAbi,functionName:"executeSwap",args:[intent,r.signature,"0x"]});
+    const hash=await wallet.writeContract({address:r.router,abi:routerAbi,functionName:"executeSwap",args:[intent,r.signature,r.adapterData||"0x"]});
     await pub.waitForTransactionReceipt({hash});
     const after=await pub.readContract({address:intent.tokenOut,abi:erc20,functionName:"balanceOf",args:[account]});
     const qty=Number(formatUnits(after-before,18));

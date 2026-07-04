@@ -45,6 +45,257 @@ Adding a market is one call — deploy a `ConstantProductAdapter`, seed it, and
 `router.setVenue(keccak256("<SYM>_MKT"), pool, false)`. NFLX, PLTR, wGOLD, wETH,
 wBTC (all faucet-available) drop in the same way. Run: `script/ListStocks.s.sol`.
 
+### Best-execution routing — the aggregator, live (`copilot/bestex.mjs`)
+
+Phase 1 listed **one** pool per stock. An aggregator needs a *choice*. This gives
+every market a **second, independently-priced venue** and puts a real
+best-execution router in front of them: quote every venue, drop any that fail the
+Chainlink guard, then route the whole order to the best single fill **or split it
+across venues** when that beats any single pool. The `IntentRouter` already routes
+by `intent.venue → adapter`, so routing was solved on-chain — this is the missing
+*decision* layer, and it's identical to the 1inch/CoW model, intent-based.
+
+Second venue per market (`script/AddVenues.s.sol`), registered on the **live**
+Phase-0 router — deeper reserves, so the winning venue is **trade-size-dependent**:
+
+| Market | Pool A (`<SYM>_MKT`) | Pool B (`<SYM>_B`, deeper) |
+|---|---|---|
+| TSLA | `0x24014a267D5CfA33e2D8d57082Da2657a304f83F` | `0x56b143e0b17a8252bad72be2bca4fbfa0f3bfd7d` |
+| AMD  | `0x54421fdcC9Ec50867D24367201bEEDc232C25998` | `0xb7f74b12aa195ddc7f294cd1c2422fcef725add0` |
+| AMZN | `0x09ccA9757B350a10A7B0346b42C8b7d027ac80Ed` | `0xe4dd21ec906c99ab94ba296a37d1e1a61d6a9885` |
+
+The router (`decide()` in `bestex.mjs`) does three things, all view-only and using
+the **exact** constant-product math the adapter executes, so the number it routes
+on is the number the fill produces:
+
+1. **Oracle-filtered venue set** — a venue whose spot deviates > 5% from the
+   Chainlink feed is dropped *from routing* (not just refused at sign time). The
+   same guard that protects the attestor now drives venue choice, so a pool the
+   testnet keeper has let drift is simply skipped in favour of the healthy one.
+2. **Best single fill** — route the whole order to the venue with the most output
+   (deeper Pool B wins large orders; a keener-priced Pool A can win small ones).
+3. **Optimal split** — a water-filling search hands each marginal slice to the
+   venue offering the best marginal rate, then executes the plan as N
+   attestor-signed intents. It's only taken when it beats the best single fill.
+
+**Proven live on Robinhood Chain testnet (chain `46630`):**
+
+- On-chain best-ex proof — a 1,000-USDC TSLA buy quotes higher on deep Pool B and
+  routes there: [`0x9c654475…3ed6`](https://explorer.testnet.chain.robinhood.com/tx/0x9c65447536e3b6b4ae02d488ffea8994f037139326ff77b8fddb98ad77cd3ed6).
+- Co-pilot **split** fill — `"buy $300 of TSLA"` split `$115.50 → Pool A` +
+  `$184.50 → Pool B`, delivering `0.7616 TSLA` vs `0.7322` best-single (**+400bps**)
+  across two attestor-signed intents:
+  [`0x882f08b9…5264e`](https://explorer.testnet.chain.robinhood.com/tx/0x882f08b9a2b2b61d6bac0afdb3e24043c7908cbecd02db897d3b648980d5264e)
+  · [`0x836daeb5…6acd`](https://explorer.testnet.chain.robinhood.com/tx/0x836daeb5acecd4ab5e7865d5ff715350133d8730a1aa5f417599ac0150ac6acd).
+
+```bash
+node copilot/copilot.mjs "buy $300 of TSLA"   # quotes both venues, splits, fills
+node copilot/rebalance.mjs                     # walk pools back to the oracle price
+```
+
+> **Testnet honesty.** These two pools are independent constant-product AMMs
+> standing in for the chain's real venues (Uniswap + Pleiades) — our faucet Stock
+> Tokens have no pools there yet. The router is venue-agnostic (it only needs an
+> `IVenueAdapter` that can `quote`), so on mainnet a `UniswapV2Adapter` /
+> `PleiadesAdapter` drops in unchanged and the same `decide()` routes across them.
+> Reserves are small, so keep trades modest or run `rebalance.mjs`; the testnet
+> Chainlink stand-in feeds are set once and don't actively track, so a large fill
+> can push a pool out of band until you rebalance — which the router handles by
+> routing to the other venue.
+
+### Mainnet venue — real Uniswap V2 routing (`UniswapV2Adapter`)
+
+The `ConstantProductAdapter` pools above are our own seeded testnet liquidity. On
+mainnet the router routes through the **chain's real venues** — Robinhood Chain
+ships Uniswap V2 + Pleiades, both V2-style AMMs — via `UniswapV2Adapter`
+(`src/shadowz/adapters/UniswapV2Adapter.sol`), vendored from the ShadowzDex
+production `SushiV2Adapter` (live on Arbitrum), logic unchanged.
+
+One adapter serves **every** V2 pair. It decodes `adapterData` and calls the
+router directly, so it reaches brand-new, unindexed pools in a single tx:
+
+```
+adapterData = abi.encode(address v2Router, address[] path, bool feeOnTransfer)
+  • v2Router   — governance-whitelisted (allowedRouter); the attestor picks
+                 Uniswap / Pleiades / Sushi by where the pool lives
+  • path       — [tokenIn, …, tokenOut]; head/tail checked against the intent
+  • minOut     — enforced by the IntentRouter after execute() returns
+```
+
+**Proven live on Robinhood Chain testnet** — the adapter registered on the **live**
+Phase-0 router and an attestor-signed intent filled `100 USDC → tUNIV2` through a
+Uniswap-V2 pool (a `MockUniswapV2` stand-in, since our faucet Stock Tokens have no
+real V2 pairs on testnet). The script asserts the on-chain fill **exactly equals**
+the off-chain V2 quote:
+
+| Contract | Address |
+|---|---|
+| UniswapV2Adapter | `0x8f929a410408d18b04da787ea596afbdbc4e0e55` |
+| venue key | `keccak256("UNISWAP_V2")` |
+| Fill tx | [`0x93b2f143…b80e`](https://explorer.testnet.chain.robinhood.com/tx/0x93b2f14318b15176eaafeb35785ff7f82deb5a42f1e973b9d4beb5ebf5b1b80e) — `got == expOut`, `got >= minOut` |
+
+Run: `forge script script/ProveUniV2.s.sol --rpc-url rh_testnet --broadcast --slow`.
+
+The best-execution router treats a V2 venue like any other — it quotes the pair's
+`getReserves()` with the exact Uniswap `getAmountOut` math (bit-identical to the
+on-chain fill) and can route or split across constant-product **and** V2 venues in
+the same order. A market lists a V2 venue by adding to `markets.json`:
+
+```jsonc
+{ "venue": "UNISWAP_V2", "pool": "<pair addr>", "kind": "univ2",
+  "router": "<v2 router addr>", "feeBps": 30, "label": "Uniswap V2" }
+```
+
+**Mainnet deploy — full stack, in sequence** (`rh_mainnet` =
+`rpc.mainnet.chain.robinhood.com`, chain `4663`). Every address comes from env
+(`.env.mainnet.example`); both scripts validate on-chain before any write.
+
+> **One command:** `./deploy-mainnet.sh` runs all three steps below — it
+> preflights (chain id, deployer balance, Safe has code), **dry-runs each step on
+> a mainnet fork**, and only broadcasts after you type `yes`. It captures the
+> router address from step 1 into `.env.mainnet` for step 2 automatically. Run a
+> single step with `./deploy-mainnet.sh router|venues|renounce`. The manual
+> `forge` commands below are the equivalent.
+
+1. **Router** — `script/DeployProveMainnet.s.sol` deploys the production
+   `IntentRouter`, authorizes the CRE attestor, sets the fee policy, and grants
+   every admin role to the mainnet Safe (`ADMIN` must have code; a Gnosis Safe's
+   `getThreshold()` is sanity-checked). `PERMIT2` defaults to the canonical
+   `0x0000…78BA3` — **verified deployed on RH mainnet**, so the Permit2 path works
+   out of the box. Keep `RENOUNCE_DEPLOYER=false` so step 2 can use the deployer's
+   `CONFIG_ROLE`; the run asserts the attestor is registered and the Safe holds
+   admin. Copy the emitted router address into `INTENT_ROUTER`.
+2. **Adapter + venues** — `script/DeployMainnetUniV2.s.sol` (below).
+3. **Renounce** — re-run step 1 with `RENOUNCE_DEPLOYER=true` (or renounce via the
+   Safe) to drop the deployer's roles once wiring is done. The run asserts the
+   deployer no longer holds admin.
+
+```bash
+cp .env.mainnet.example .env.mainnet    # fill in verified mainnet addresses
+forge script script/DeployProveMainnet.s.sol --fork-url rh_mainnet -vvvv          # dry-run step 1
+forge script script/DeployProveMainnet.s.sol --rpc-url rh_mainnet --broadcast --slow
+```
+
+**Step 2 — wire the Uniswap V2 venue** with `script/DeployMainnetUniV2.s.sol`
+against the router from step 1. Every address is **validated on-chain before any
+write**:
+
+- `INTENT_ROUTER` must have code, and the broadcaster must hold its `CONFIG_ROLE`
+  (fails fast with `MissingConfigRole` instead of a bare `setVenue` revert);
+- every `V2_ROUTERS` entry must have code **and** answer `factory() != 0` — i.e.
+  actually be a Uniswap-V2 router, so a fat-fingered address reverts `NotARouter`
+  rather than mis-wiring the live router;
+- `ADMIN` (the adapter's role admin — the per-chain Safe) must be nonzero.
+
+It deploys the adapter with the real routers whitelisted and registers one venue
+key per DEX (`VENUE_KEYS=UNISWAP_V2,RIALTO_V2`) — all resolving to the single
+adapter; the pool is chosen by `adapterData`. Then point each market's `univ2`
+venue in `markets.json` at the real pair — no co-pilot code changes.
+
+```bash
+forge script script/DeployMainnetUniV2.s.sol --fork-url rh_mainnet -vvvv        # dry-run step 2
+forge script script/DeployMainnetUniV2.s.sol --rpc-url rh_mainnet --broadcast --slow
+```
+
+> The real Uniswap / Rialto router addresses weren't public at time of writing
+> (mainnet launched 2026-07) — get them from `docs.robinhood.com/chain/connecting`,
+> the mainnet explorer, Uniswap's deployment docs, or `chain-developers-group@robinhood.com`,
+> and the script's on-chain validation guarantees you can't wire a wrong one.
+
+### Portfolio agent — baskets + rebalancing (`copilot/basket.mjs`)
+
+The co-pilot's trade core is extracted into `copilot/engine.mjs` (best-ex swap +
+tax-lot recording), and the **portfolio agent** builds on it: a basket buy or a
+rebalance is just *N best-execution legs*, so every one inherits multi-venue
+routing, optimal split, the Chainlink oracle guard, and — on mainnet — the
+`UniswapV2Adapter`.
+
+- **Baskets** — built-ins (`EQUAL`, `TECH`, `AICHIP`) over the tradeable symbols,
+  plus user-defined ones (`define TECH "TSLA=50,AMD=30,AMZN=20"`, persisted to a
+  gitignored file). Weights normalise automatically.
+- **Basket buy** — spread a dollar amount across the target weights, best-ex each leg.
+- **Rebalance** — mark holdings to Chainlink, compute the drift from target
+  weights, and generate the sell/buy legs to restore them (a dust threshold skips
+  tiny trades; overweights sell first to free USDC, then underweights buy). By
+  default it only touches the basket's symbols — it never surprise-sells anything
+  else. Pass **`--liquidate`** to also sell down any tradeable holding *outside*
+  the basket (target weight 0) and fold its value into the total so it funds the
+  basket buys.
+- **Natural language** + a `--dry` preview that prints the plan without trading.
+
+```bash
+node copilot/basket.mjs rebalance TECH --dry          # preview the drift + trade plan
+node copilot/basket.mjs buy EQUAL 15                   # buy $5 each, best-ex per leg
+node copilot/basket.mjs rebalance --weights "TSLA=60,AMD=40" --liquidate  # sell AMZN into the target
+node copilot/basket.mjs nl "move my whole portfolio into the tech basket"
+```
+
+**Proven live** — `buy EQUAL 15` opened the three-symbol basket, and **every leg
+split across both venues** (+7 / +22 / +28 bps vs best-single) as six
+attestor-signed fills, each booked to the tax ledger. The `--dry` rebalance
+correctly reads a TSLA-overweight book (77% → target 40%) and lays out the
+sell-TSLA / buy-AMD / buy-AMZN plan.
+
+### DCA keeper — recurring buys (`copilot/dca.mjs`)
+
+Standing *"buy $X of SYM every N"* orders, fired through the same best-execution
+engine — so every occurrence is a full best-ex buy (multi-venue + split + oracle
+guard), booked to the tax ledger. Schedules live in MongoDB (`rh_dca_schedules`
++ an `rh_dca_runs` audit log); the keeper just decides *when*.
+
+```bash
+node copilot/dca.mjs add TSLA 50 1w --max 12 --budget 600   # $50/week, 12 runs, $600 cap
+node copilot/dca.mjs add-nl "put $10 into AMD every 2 days"
+node copilot/dca.mjs list
+node copilot/dca.mjs run                      # fire everything due once (cron/Temporal-friendly)
+node copilot/dca.mjs run --watch --tick 15    # local loop until no active schedules
+```
+
+Each schedule carries optional `--max` (run count) and `--budget` (total USD) caps
+and auto-deactivates when either is hit; a failed occurrence (e.g. the oracle guard
+refusing an off-band pool) is logged and retried on the next tick rather than
+skipped. **Proven live** — a `$3 TSLA every 15s, max 2` schedule fired two best-ex
+buys ~15s apart (routed to different pools), booked both to the ledger, then
+completed (`2/2 runs · $6.00 spent`) and the keeper exited.
+
+> **Scheduling & custody.** `run` is one-shot — drive it from cron / Temporal / the
+> existing shadowz-keeperz relayer on your cadence rather than a bespoke long-lived
+> process (`--watch` is a local-demo convenience). Custody is the single-user model
+> (keeper signs with `DEPLOYER_PK`); for multi-user non-custodial DCA the
+> `IntentRouter` already ships `executeSwapWithPermit2Keeper` — a relayer submits
+> while the user's Permit2 witness binds the pull to one intent.
+
+### Limit & stop-loss orders (`copilot/orders.mjs`)
+
+Conditional orders that fire once when the Chainlink price crosses a trigger —
+same store + engine shape as the DCA keeper, just a **price** trigger instead of a
+**time** trigger. The four types fall out of (action × direction):
+
+| type | fires when |
+|---|---|
+| limit-buy | `buy` when price **≤** trigger (buy the dip) |
+| stop-buy | `buy` when price **≥** trigger (breakout) |
+| take-profit | `sell` when price **≥** trigger (sell the rip) |
+| stop-loss | `sell` when price **≤** trigger (cut losses) |
+
+```bash
+node copilot/orders.mjs add buy  TSLA 100 below 350          # limit buy
+node copilot/orders.mjs add sell TSLA all  above 400         # take-profit
+node copilot/orders.mjs add sell AMD  all  below 150 --expires 7d   # stop-loss (GTD)
+node copilot/orders.mjs add-nl "sell my TSLA if it hits $400"
+node copilot/orders.mjs run                 # check triggers once (cron/Temporal-friendly)
+node copilot/orders.mjs run --watch --tick 15
+```
+
+Each firing is a full best-ex buy/sell booked to the ledger; a triggered order that
+can't execute (e.g. the oracle guard refusing an off-band pool) stays open and
+retries next tick. Orders are market-if-touched — an order whose condition already
+holds fires on the next `run` (flagged at creation). Optional `--expires` closes a
+GTD order unfilled once it lapses. **Proven live** — with TSLA at $367.30, a
+`limit-buy ≤ $400` and a `take-profit ≥ $300` both triggered and executed via
+best-ex (bought + sold $3), while a `buy AMD ≤ $150` and `sell TSLA ≥ $400`
+correctly stayed open.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the
