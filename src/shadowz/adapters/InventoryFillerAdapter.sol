@@ -157,10 +157,8 @@ contract InventoryFillerAdapter is IVenueAdapter, AccessControl, Pausable {
         if (stock == address(0) || feed == address(0)) revert ZeroAddress();
         if (stock == quote) revert UnsupportedPair();
         uint8 fdec = IAggregatorV3(feed).decimals();
-        // Sanity: the feed is live and non-negative right now.
-        (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(feed).latestRoundData();
-        if (answer <= 0) revert BadPrice();
-        if (block.timestamp - updatedAt > maxStaleness) revert StalePrice();
+        // Sanity: the feed is live, complete, and fresh right now.
+        _readPrice(feed);
         uint8 sdec = IERC20Metadata(stock).decimals();
         markets[stock] = Market({feed: feed, feedDecimals: fdec, stockDecimals: sdec, listed: true});
         emit MarketListed(stock, feed, fdec, sdec);
@@ -221,8 +219,16 @@ contract InventoryFillerAdapter is IVenueAdapter, AccessControl, Pausable {
     }
 
     function _price(Market memory m) internal view returns (uint256) {
-        (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(m.feed).latestRoundData();
+        return _readPrice(m.feed);
+    }
+
+    /// @dev Read + fully validate a Chainlink round: positive answer, a complete
+    ///      round (`updatedAt != 0`), no future timestamp (guards the subtraction
+    ///      underflow on L2 clock drift / forks), and within the staleness window.
+    function _readPrice(address feed) internal view returns (uint256) {
+        (, int256 answer,, uint256 updatedAt,) = IAggregatorV3(feed).latestRoundData();
         if (answer <= 0) revert BadPrice();
+        if (updatedAt == 0 || block.timestamp < updatedAt) revert StalePrice();
         if (block.timestamp - updatedAt > maxStaleness) revert StalePrice();
         return uint256(answer);
     }
@@ -263,15 +269,21 @@ contract InventoryFillerAdapter is IVenueAdapter, AccessControl, Pausable {
         uint256 price = _price(m);
         uint256 scaleStockFeed = 10 ** (uint256(m.stockDecimals) + uint256(m.feedDecimals));
         uint256 priceQuote = price * (10 ** uint256(quoteDecimals));
+        // Price on what the router ACTUALLY forwarded: for fee-bearing intents it
+        // sends `amountIn - bridgeFeeAmount` (fee already skimmed to the FeeVault).
+        // Pricing on the full amountIn would deliver output for tokens never
+        // received — draining inventory to subsidize the fee. (router guarantees
+        // bridgeFeeAmount < amountIn, so this cannot underflow.)
+        uint256 amountInNet = intent.amountIn - intent.bridgeFeeAmount;
         out = buy
-            ? Math.mulDiv(intent.amountIn, scaleStockFeed, priceQuote)
-            : Math.mulDiv(intent.amountIn, priceQuote, scaleStockFeed);
+            ? Math.mulDiv(amountInNet, scaleStockFeed, priceQuote)
+            : Math.mulDiv(amountInNet, priceQuote, scaleStockFeed);
         out = Math.mulDiv(out, uint256(10_000 - spreadBps), 10_000);
         if (out == 0) revert ZeroOutput();
 
         // Deliver tokenOut to the router; it enforces minOut + forwards to user.
         // Reverts on insufficient inventory (SafeERC20), failing the intent cleanly.
         IERC20(intent.tokenOut).safeTransfer(msg.sender, out);
-        emit Filled(intent.user, stock, buy, intent.amountIn, out, price);
+        emit Filled(intent.user, stock, buy, amountInNet, out, price);
     }
 }

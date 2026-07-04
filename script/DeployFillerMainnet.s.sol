@@ -102,7 +102,7 @@ contract DeployFillerMainnet {
             address feed = feeds[i];
             if (feed.code.length == 0) revert NotAContract(feed);
             (, int256 answer,, uint256 updatedAt,) = IAggregatorV3Min(feed).latestRoundData();
-            if (answer <= 0) revert DeadFeed(feed);
+            if (answer <= 0 || updatedAt == 0 || block.timestamp < updatedAt) revert DeadFeed(feed);
             uint256 age = block.timestamp - updatedAt;
             if (age > maxStaleness) revert StaleFeed(feed, age);
         }

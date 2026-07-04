@@ -6,6 +6,7 @@ import {SwapIntent} from "../src/shadowz/interfaces/IntentTypes.sol";
 import {MockERC20} from "../src/kit/MockERC20.sol";
 import {MockAggregator} from "../src/kit/MockAggregator.sol";
 import {InventoryFillerAdapter} from "../src/shadowz/adapters/InventoryFillerAdapter.sol";
+import {FeeVault} from "../src/shadowz/FeeVault.sol";
 
 interface Vm {
     function sign(uint256 pk, bytes32 digest) external returns (uint8 v, bytes32 r, bytes32 s);
@@ -40,6 +41,7 @@ contract ProveInventoryFiller {
 
     event FillerBuyProof(uint256 usdcIn, uint256 expStockOut, uint256 got);
     event FillerSellProof(uint256 stockIn, uint256 expUsdcOut, uint256 got);
+    event FillerFeeProof(uint256 usdcIn, uint256 bridgeFee, uint256 netQuote, uint256 got);
 
     function run() external {
         uint256 deployerPk = vm.envOr("DEPLOYER_PK", uint256(0));
@@ -124,6 +126,45 @@ contract ProveInventoryFiller {
             require(usdc.balanceOf(me) - before == got, "sell: reported != delivered");
             require(got == expOut, "sell: fill != oracle quote");
             emit FillerSellProof(amountIn, expOut, got);
+        }
+
+        // ── FEE-BEARING: prove the fill prices on the NET amount forwarded, not
+        //    the full amountIn — i.e. the bridgeFeeAmount inventory-drain is fixed.
+        {
+            FeeVault vault = new FeeVault(me);
+            vault.grantRole(vault.DEPOSITOR_ROLE(), ROUTER);
+            router.setFeeVault(address(vault));
+
+            uint256 amountIn = 100e6;
+            uint256 fee = 40e6; // 40% skimmed to the FeeVault; only 60 USDC reaches the adapter
+            uint256 net = amountIn - fee;
+            uint256 expOut = adapter.quoteOut(USDC, address(stock), net); // priced on NET
+            // The fix is active only if the net-priced output is strictly below the
+            // full-amount output (pre-fix behaviour would have delivered the latter).
+            require(expOut < adapter.quoteOut(USDC, address(stock), amountIn), "fee not applied");
+
+            SwapIntent memory intent = SwapIntent({
+                user: me,
+                tokenIn: USDC,
+                tokenOut: address(stock),
+                amountIn: amountIn,
+                minOut: expOut,
+                deadline: block.timestamp + 600,
+                venue: VENUE,
+                nonce: 9003,
+                extra: "",
+                bridgeFeeAmount: fee,
+                sdmTier: 0
+            });
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(deployerPk, router.hashIntent(intent));
+
+            usdc.mint(me, amountIn);
+            usdc.approve(ROUTER, amountIn);
+            uint256 before = stock.balanceOf(me);
+            uint256 got = router.executeSwap(intent, abi.encodePacked(r, s, v), "");
+            require(stock.balanceOf(me) - before == got, "fee: reported != delivered");
+            require(got == expOut, "fee: fill != NET-priced quote (drain not fixed)");
+            emit FillerFeeProof(amountIn, fee, expOut, got);
         }
 
         vm.stopBroadcast();

@@ -20,11 +20,39 @@ const univ2Abi = [
   { name: "getReserves", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint112" }, { type: "uint112" }, { type: "uint32" }] },
   { name: "token0", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
 ];
+// InventoryFillerAdapter — oracle-priced RFQ venue. We read its static params once
+// (price, spread, decimals, inventory) and compute the quote locally, identical to
+// the on-chain execute() math, so the off-chain search agrees with the fill.
+const fillerAbi = [
+  { name: "markets", type: "function", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "address" }, { type: "uint8" }, { type: "uint8" }, { type: "bool" }] },
+  { name: "spreadBps", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint16" }] },
+  { name: "quoteDecimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
+];
+const feedAbi = [
+  { name: "latestRoundData", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint80" }, { type: "int256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint80" }] },
+];
+const erc20BalAbi = [
+  { name: "balanceOf", type: "function", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
+];
 
 // x*y=k quote against local reserves — identical math to the on-chain adapter,
 // so an off-chain search never disagrees with the fill.
 function quoteLocal(res, tokenIn, amountIn) {
   if (amountIn <= 0n) return 0n;
+  if (res.kind === "filler") {
+    // Oracle-priced fill, flat rate (no slippage) up to the MM's inventory.
+    // Mirrors InventoryFillerAdapter.execute(): out = amountIn scaled by the feed
+    // price, minus spread, then capped at the tokenOut inventory on hand.
+    if (res.price <= 0n) return 0n;
+    const scaleStockFeed = 10n ** (BigInt(res.sDec) + BigInt(res.fDec));
+    const priceQuote = res.price * 10n ** BigInt(res.qDec);
+    let out = tokenIn === "usdc"
+      ? (amountIn * scaleStockFeed) / priceQuote // buy stock with USDC
+      : (amountIn * priceQuote) / scaleStockFeed; // sell stock for USDC
+    out = (out * (10_000n - res.spreadBps)) / 10_000n;
+    const cap = tokenIn === "usdc" ? res.invStock : res.invUsdc;
+    return out < cap ? out : cap; // fills only up to inventory
+  }
   const [rIn, rOut] = tokenIn === "usdc" ? [res.rUsdc, res.rStock] : [res.rStock, res.rUsdc];
   if (rIn <= 0n || rOut <= 0n) return 0n; // unseeded / empty pool
   const amtF = (amountIn * (10_000n - res.feeBps)) / 10_000n;
@@ -34,14 +62,40 @@ function quoteLocal(res, tokenIn, amountIn) {
 
 // Snapshot every venue's reserves once (side = "usdc" means USDC is tokenIn / a buy).
 // A venue's `kind` selects how reserves are read:
-//   "cp"    — our ConstantProductAdapter (reserveUsdc/reserveStock/FEE_BPS)   [default]
-//   "univ2" — a Uniswap V2-style pair (getReserves + token0), fee from cfg (30bps)
-//             and `router` carried through so the co-pilot can build adapterData.
+//   "cp"     — our ConstantProductAdapter (reserveUsdc/reserveStock/FEE_BPS)  [default]
+//   "univ2"  — a Uniswap V2-style pair (getReserves + token0), fee from cfg (30bps)
+//              and `router` carried through so the co-pilot can build adapterData.
+//   "filler" — the InventoryFillerAdapter (oracle-priced RFQ). `pool` is the adapter,
+//              `stock` the Stock Token; we snapshot its feed price, spread, decimals
+//              and inventory once. adapterData is empty — the adapter ignores it.
 export async function loadVenues(pub, venuesCfg, usdcAddr) {
   return Promise.all(
     venuesCfg.map(async (v) => {
       const kind = v.kind ?? "cp";
       const base = { key: v.venue, label: v.label ?? v.venue, pool: v.pool, kind, router: v.router ?? null };
+      if (kind === "filler") {
+        const [feed, feedDecimals, stockDecimals] = await pub.readContract({
+          address: v.pool, abi: fillerAbi, functionName: "markets", args: [v.stock],
+        });
+        const [spreadBps, qDec, round, invStock, invUsdc] = await Promise.all([
+          pub.readContract({ address: v.pool, abi: fillerAbi, functionName: "spreadBps" }),
+          pub.readContract({ address: v.pool, abi: fillerAbi, functionName: "quoteDecimals" }),
+          pub.readContract({ address: feed, abi: feedAbi, functionName: "latestRoundData" }),
+          pub.readContract({ address: v.stock, abi: erc20BalAbi, functionName: "balanceOf", args: [v.pool] }),
+          pub.readContract({ address: usdcAddr, abi: erc20BalAbi, functionName: "balanceOf", args: [v.pool] }),
+        ]);
+        const price = BigInt(round[1]); // answer (int256), 8-dec USD
+        return {
+          ...base,
+          stock: v.stock,
+          price,
+          spreadBps: BigInt(spreadBps),
+          qDec: Number(qDec), sDec: Number(stockDecimals), fDec: Number(feedDecimals),
+          invStock: BigInt(invStock), invUsdc: BigInt(invUsdc),
+          // surface inventory as reserves so mid-price / display code stays uniform
+          rUsdc: BigInt(invUsdc), rStock: BigInt(invStock), feeBps: BigInt(spreadBps),
+        };
+      }
       if (kind === "univ2") {
         const [res, token0] = await Promise.all([
           pub.readContract({ address: v.pool, abi: univ2Abi, functionName: "getReserves" }),
@@ -126,6 +180,9 @@ export function optimalSplit(venues, side, amountIn, steps = 200) {
 
 // Spot mid-price of a venue in USD/share (USDC 6-dec, stock 18-dec).
 export function venueMid(v) {
+  // A filler prices AT its Chainlink feed, so its mid IS the oracle price — it's
+  // never pushed out of the oracle band (devBps ≈ 0).
+  if (v.kind === "filler") return v.price > 0n ? Number(v.price) / 10 ** v.fDec : 0;
   // divide before scaling to avoid Number overflow (Number(rUsdc)*1e12 can exceed 2^53)
   return v.rStock > 0n ? (Number(v.rUsdc) / Number(v.rStock)) * 1e12 : 0;
 }
