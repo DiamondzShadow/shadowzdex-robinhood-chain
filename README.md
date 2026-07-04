@@ -265,6 +265,37 @@ completed (`2/2 runs · $6.00 spent`) and the keeper exited.
 > `IntentRouter` already ships `executeSwapWithPermit2Keeper` — a relayer submits
 > while the user's Permit2 witness binds the pull to one intent.
 
+### Limit & stop-loss orders (`copilot/orders.mjs`)
+
+Conditional orders that fire once when the Chainlink price crosses a trigger —
+same store + engine shape as the DCA keeper, just a **price** trigger instead of a
+**time** trigger. The four types fall out of (action × direction):
+
+| type | fires when |
+|---|---|
+| limit-buy | `buy` when price **≤** trigger (buy the dip) |
+| stop-buy | `buy` when price **≥** trigger (breakout) |
+| take-profit | `sell` when price **≥** trigger (sell the rip) |
+| stop-loss | `sell` when price **≤** trigger (cut losses) |
+
+```bash
+node copilot/orders.mjs add buy  TSLA 100 below 350          # limit buy
+node copilot/orders.mjs add sell TSLA all  above 400         # take-profit
+node copilot/orders.mjs add sell AMD  all  below 150 --expires 7d   # stop-loss (GTD)
+node copilot/orders.mjs add-nl "sell my TSLA if it hits $400"
+node copilot/orders.mjs run                 # check triggers once (cron/Temporal-friendly)
+node copilot/orders.mjs run --watch --tick 15
+```
+
+Each firing is a full best-ex buy/sell booked to the ledger; a triggered order that
+can't execute (e.g. the oracle guard refusing an off-band pool) stays open and
+retries next tick. Orders are market-if-touched — an order whose condition already
+holds fires on the next `run` (flagged at creation). Optional `--expires` closes a
+GTD order unfilled once it lapses. **Proven live** — with TSLA at $367.30, a
+`limit-buy ≤ $400` and a `take-profit ≥ $300` both triggered and executed via
+best-ex (bought + sold $3), while a `buy AMD ≤ $150` and `sell TSLA ≥ $400`
+correctly stayed open.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the
