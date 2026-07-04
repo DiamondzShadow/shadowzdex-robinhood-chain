@@ -45,6 +45,64 @@ Adding a market is one call — deploy a `ConstantProductAdapter`, seed it, and
 `router.setVenue(keccak256("<SYM>_MKT"), pool, false)`. NFLX, PLTR, wGOLD, wETH,
 wBTC (all faucet-available) drop in the same way. Run: `script/ListStocks.s.sol`.
 
+### Best-execution routing — the aggregator, live (`copilot/bestex.mjs`)
+
+Phase 1 listed **one** pool per stock. An aggregator needs a *choice*. This gives
+every market a **second, independently-priced venue** and puts a real
+best-execution router in front of them: quote every venue, drop any that fail the
+Chainlink guard, then route the whole order to the best single fill **or split it
+across venues** when that beats any single pool. The `IntentRouter` already routes
+by `intent.venue → adapter`, so routing was solved on-chain — this is the missing
+*decision* layer, and it's identical to the 1inch/CoW model, intent-based.
+
+Second venue per market (`script/AddVenues.s.sol`), registered on the **live**
+Phase-0 router — deeper reserves, so the winning venue is **trade-size-dependent**:
+
+| Market | Pool A (`<SYM>_MKT`) | Pool B (`<SYM>_B`, deeper) |
+|---|---|---|
+| TSLA | `0x24014a267D5CfA33e2D8d57082Da2657a304f83F` | `0x56b143e0b17a8252bad72be2bca4fbfa0f3bfd7d` |
+| AMD  | `0x54421fdcC9Ec50867D24367201bEEDc232C25998` | `0xb7f74b12aa195ddc7f294cd1c2422fcef725add0` |
+| AMZN | `0x09ccA9757B350a10A7B0346b42C8b7d027ac80Ed` | `0xe4dd21ec906c99ab94ba296a37d1e1a61d6a9885` |
+
+The router (`decide()` in `bestex.mjs`) does three things, all view-only and using
+the **exact** constant-product math the adapter executes, so the number it routes
+on is the number the fill produces:
+
+1. **Oracle-filtered venue set** — a venue whose spot deviates > 5% from the
+   Chainlink feed is dropped *from routing* (not just refused at sign time). The
+   same guard that protects the attestor now drives venue choice, so a pool the
+   testnet keeper has let drift is simply skipped in favour of the healthy one.
+2. **Best single fill** — route the whole order to the venue with the most output
+   (deeper Pool B wins large orders; a keener-priced Pool A can win small ones).
+3. **Optimal split** — a water-filling search hands each marginal slice to the
+   venue offering the best marginal rate, then executes the plan as N
+   attestor-signed intents. It's only taken when it beats the best single fill.
+
+**Proven live on Robinhood Chain testnet (chain `46630`):**
+
+- On-chain best-ex proof — a 1,000-USDC TSLA buy quotes higher on deep Pool B and
+  routes there: [`0x9c654475…3ed6`](https://explorer.testnet.chain.robinhood.com/tx/0x9c65447536e3b6b4ae02d488ffea8994f037139326ff77b8fddb98ad77cd3ed6).
+- Co-pilot **split** fill — `"buy $300 of TSLA"` split `$115.50 → Pool A` +
+  `$184.50 → Pool B`, delivering `0.7616 TSLA` vs `0.7322` best-single (**+400bps**)
+  across two attestor-signed intents:
+  [`0x882f08b9…5264e`](https://explorer.testnet.chain.robinhood.com/tx/0x882f08b9a2b2b61d6bac0afdb3e24043c7908cbecd02db897d3b648980d5264e)
+  · [`0x836daeb5…6acd`](https://explorer.testnet.chain.robinhood.com/tx/0x836daeb5acecd4ab5e7865d5ff715350133d8730a1aa5f417599ac0150ac6acd).
+
+```bash
+node copilot/copilot.mjs "buy $300 of TSLA"   # quotes both venues, splits, fills
+node copilot/rebalance.mjs                     # walk pools back to the oracle price
+```
+
+> **Testnet honesty.** These two pools are independent constant-product AMMs
+> standing in for the chain's real venues (Uniswap + Pleiades) — our faucet Stock
+> Tokens have no pools there yet. The router is venue-agnostic (it only needs an
+> `IVenueAdapter` that can `quote`), so on mainnet a `UniswapV2Adapter` /
+> `PleiadesAdapter` drops in unchanged and the same `decide()` routes across them.
+> Reserves are small, so keep trades modest or run `rebalance.mjs`; the testnet
+> Chainlink stand-in feeds are set once and don't actively track, so a large fill
+> can push a pool out of band until you rebalance — which the router handles by
+> routing to the other venue.
+
 ### Co-pilot — natural-language trading (`copilot/`)
 
 The flagship: say what you want, it fills. Fireworks parses the instruction, the

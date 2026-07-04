@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { createPublicClient, http as vhttp, defineChain, keccak256, toHex, formatUnits, parseUnits } from "viem";
 import { sign, serializeSignature } from "viem/accounts";
 import * as ledger from "./ledger.mjs";
+import { loadVenues, quoteAll, decide } from "./bestex.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(readFileSync(join(__dir, "markets.json"), "utf8"));
@@ -34,11 +35,6 @@ const chain = defineChain({ id: cfg.chainId, name: "Robinhood Chain Testnet",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] } } });
 const pub = createPublicClient({ chain, transport: vhttp() });
 
-const poolAbi = [
-  { name: "quote", type: "function", stateMutability: "view", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "uint256" }] },
-  { name: "reserveUsdc", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-  { name: "reserveStock", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-];
 const feedAbi = [
   { name: "latestRoundData", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint80" }, { type: "int256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint80" }] },
   { name: "decimals", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
@@ -57,18 +53,6 @@ async function oracleUsd(mkt) {
   ]);
   return Number(formatUnits(rd[1], dec));
 }
-async function guard(mkt, sym) {
-  const [rU, rS] = await Promise.all([
-    pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "reserveUsdc" }),
-    pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "reserveStock" }),
-  ]);
-  const spot = Number(formatUnits(rU, 6)) / Number(formatUnits(rS, 18));
-  const oracle = await oracleUsd(mkt);
-  const devBps = Math.round((Math.abs(spot - oracle) / oracle) * 10000);
-  const maxDev = Number(cfg.oracleMaxDevBps ?? 500);
-  return { spot, oracle, devBps, maxDev, ok: devBps <= maxDev };
-}
-
 async function parse(instruction) {
   const symbols = Object.keys(cfg.markets).join(", ");
   const r = await fetch("https://api.fireworks.ai/inference/v1/chat/completions", {
@@ -113,20 +97,30 @@ async function handleIntent(body) {
   const dollars = Number(a.usd);
   if (!(dollars > 0)) return { status: 400, body: { error: "name a dollar amount, e.g. buy $100 of TSLA" } };
 
-  const g = await guard(mkt, sym);
-  if (!g.ok) return { status: 200, body: { kind: "rejected", symbol: sym, ...g, message: `Attestor refuses: pool deviates ${g.devBps}bps from the Chainlink oracle (> ${g.maxDev}).` } };
-
   const amountIn = parseUnits(String(dollars), 6);
-  const expOut = await pub.readContract({ address: mkt.pool, abi: poolAbi, functionName: "quote", args: [cfg.usdc, amountIn] });
+  const oracle = await oracleUsd(mkt);
+  const maxDev = Number(cfg.oracleMaxDevBps ?? 500);
+  // Best-execution: quote every venue that lists the symbol, drop off-band ones,
+  // route the order to the best eligible venue. (The CLI co-pilot additionally
+  // SPLITS across venues; the browser keeps a single-submit UX.)
+  const venues = await loadVenues(pub, mkt.venues);
+  const d = decide(venues, "usdc", amountIn, { oracle, maxDevBps: maxDev });
+  const routing = d.eligible
+    .map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: quoteAll([v], "usdc", amountIn)[0].out.toString() }))
+    .concat(d.excluded.map((v) => ({ venue: v.key, label: v.label, mid: v.mid, devBps: v.devBps, out: null, offBand: true })));
+  if (!d.best) return { status: 200, body: { kind: "rejected", symbol: sym, oracle, maxDev, routing, message: `Attestor refuses: every ${sym} venue deviates > ${maxDev}bps from the Chainlink oracle.` } };
+
+  const best = d.best;
+  const expOut = quoteAll([venues.find((v) => v.key === best.key)], "usdc", amountIn)[0].out;
   const intent = {
     user: wallet, tokenIn: cfg.usdc, tokenOut: mkt.stock, amountIn, minOut: (expOut * 98n) / 100n,
-    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(mkt.venue)),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 600), venue: keccak256(toHex(best.key)),
     nonce: BigInt("0x" + [...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")),
     extra: "0x", bridgeFeeAmount: 0n, sdmTier: 0,
   };
   const digest = await pub.readContract({ address: cfg.router, abi: routerAbi, functionName: "hashIntent", args: [intent] });
   const signature = serializeSignature(await sign({ hash: digest, privateKey: ATTESTOR_PK }));
-  return { status: 200, body: { kind: "buy", symbol: sym, dollars, expOut: expOut.toString(), oracle: g.oracle, spot: g.spot, intent, signature, router: cfg.router, usdc: cfg.usdc } };
+  return { status: 200, body: { kind: "buy", symbol: sym, dollars, expOut: expOut.toString(), oracle, spot: best.mid, routedVenue: best.key, routedLabel: best.label, vsNaiveBps: d.vsNaiveBps, routing, intent, signature, router: cfg.router, usdc: cfg.usdc } };
 }
 
 const server = http.createServer(async (req, res) => {
