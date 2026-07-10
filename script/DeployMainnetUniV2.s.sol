@@ -14,8 +14,8 @@ interface Vm {
     function envString(string calldata name, string calldata delim) external returns (string[] memory);
 }
 
-interface IUniV2RouterMin {
-    function factory() external view returns (address);
+interface IUniV2FactoryMin {
+    function allPairsLength() external view returns (uint256);
 }
 
 /// @title Mainnet wiring — register the UniswapV2Adapter on a LIVE IntentRouter.
@@ -46,14 +46,14 @@ interface IUniV2RouterMin {
 contract DeployMainnetUniV2 {
     Vm constant vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
 
-    event AdapterDeployed(address adapter, address intentRouter, address admin, uint256 routers);
-    event RouterWhitelisted(address router, address factory);
+    event AdapterDeployed(address adapter, address intentRouter, address admin, uint256 factories);
+    event FactoryWhitelisted(address factory, uint256 allPairsLength);
     event VenueRegistered(string key, bytes32 venue, address adapter);
 
     error NotAContract(address a);
-    error NotARouter(address router);
+    error NotAFactory(address factory);
     error MissingConfigRole(address caller);
-    error NoRouters();
+    error NoFactories();
     error NoVenues();
     error ZeroAdmin();
 
@@ -64,37 +64,37 @@ contract DeployMainnetUniV2 {
 
         address intentRouter = vm.envAddress("INTENT_ROUTER");
         address admin = vm.envAddress("ADMIN");
-        address[] memory routers = vm.envAddress("V2_ROUTERS", ",");
+        address[] memory factories = vm.envAddress("V2_FACTORIES", ",");
         string[] memory venueKeys = vm.envString("VENUE_KEYS", ",");
 
         // ── Validate, before writing anything ──
         if (intentRouter.code.length == 0) revert NotAContract(intentRouter);
         if (admin == address(0)) revert ZeroAdmin();
-        if (routers.length == 0) revert NoRouters();
+        if (factories.length == 0) revert NoFactories();
         if (venueKeys.length == 0) revert NoVenues();
 
         IntentRouter router = IntentRouter(intentRouter);
         // Broadcaster must hold CONFIG_ROLE, or setVenue reverts on-chain.
         if (!router.hasRole(router.CONFIG_ROLE(), me)) revert MissingConfigRole(me);
 
-        for (uint256 i = 0; i < routers.length; i++) {
-            address r = routers[i];
-            if (r.code.length == 0) revert NotAContract(r);
-            // A real UniV2 router answers factory() with a nonzero address.
-            try IUniV2RouterMin(r).factory() returns (address f) {
-                if (f == address(0)) revert NotARouter(r);
-            } catch {
-                revert NotARouter(r);
+        for (uint256 i = 0; i < factories.length; i++) {
+            address f = factories[i];
+            if (f.code.length == 0) revert NotAContract(f);
+            // A real UniV2 factory answers allPairsLength() (guards against a
+            // fat-fingered address that happens to have code).
+            try IUniV2FactoryMin(f).allPairsLength() returns (uint256) {}
+            catch {
+                revert NotAFactory(f);
             }
         }
 
         // ── Deploy + wire ──
         vm.startBroadcast(pk);
 
-        UniswapV2Adapter adapter = new UniswapV2Adapter(intentRouter, routers, admin);
-        emit AdapterDeployed(address(adapter), intentRouter, admin, routers.length);
-        for (uint256 i = 0; i < routers.length; i++) {
-            emit RouterWhitelisted(routers[i], IUniV2RouterMin(routers[i]).factory());
+        UniswapV2Adapter adapter = new UniswapV2Adapter(intentRouter, factories, admin);
+        emit AdapterDeployed(address(adapter), intentRouter, admin, factories.length);
+        for (uint256 i = 0; i < factories.length; i++) {
+            emit FactoryWhitelisted(factories[i], IUniV2FactoryMin(factories[i]).allPairsLength());
         }
 
         for (uint256 i = 0; i < venueKeys.length; i++) {
