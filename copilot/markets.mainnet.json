@@ -1,0 +1,28 @@
+{
+  "rpc": "https://rpc.mainnet.chain.robinhood.com",
+  "chainId": 4663,
+  "explorer": "https://explorer.mainnet.chain.robinhood.com",
+  "router": "0x7aab9e2261bc022b89376f5f6ad0417f076e6e7a",
+  "usdc": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  "oracleMaxDevBps": 500,
+  "markets": {
+    "TSLA": { "name": "Tesla",  "stock": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "feed": "0x4A1166a659A55625345e9515b32adECea5547C38", "venue": "SHADOWZ_RFQ",
+      "venues": [
+        { "venue": "SHADOWZ_RFQ", "kind": "filler", "pool": "0x0271468f8c1a09c88f517c13eeee38d6be7aedc5", "stock": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "label": "ShadowzRFQ (oracle-priced)" }
+      ] },
+    "AMD":  { "name": "AMD",    "stock": "0x86923f96303D656E4aa86D9d42D1e57ad2023fdC", "feed": "0x943A29E7ae51A4798823ca9eEd2ed533B2A22C72", "venue": "SHADOWZ_RFQ",
+      "venues": [
+        { "venue": "SHADOWZ_RFQ", "kind": "filler", "pool": "0x0271468f8c1a09c88f517c13eeee38d6be7aedc5", "stock": "0x86923f96303D656E4aa86D9d42D1e57ad2023fdC", "label": "ShadowzRFQ (oracle-priced)" }
+      ] },
+    "AMZN": { "name": "Amazon", "stock": "0x12f190a9F9d7D37a250758b26824B97CE941bF54", "feed": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C", "venue": "SHADOWZ_RFQ",
+      "venues": [
+        { "venue": "SHADOWZ_RFQ", "kind": "filler", "pool": "0x0271468f8c1a09c88f517c13eeee38d6be7aedc5", "stock": "0x12f190a9F9d7D37a250758b26824B97CE941bF54", "label": "ShadowzRFQ (oracle-priced)" }
+      ] },
+    "WETH": { "name": "Ethereum", "stock": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "feed": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9", "venue": "UNISWAP_V3",
+      "venues": [
+        { "venue": "UNISWAP_V3", "kind": "univ3", "pool": "0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a", "router": "0xcaf681a66d020601342297493863e78c959e5cb2", "fee": 500,  "stock": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "label": "Uniswap V3 (0.05%)" },
+        { "venue": "UNISWAP_V3", "kind": "univ3", "pool": "0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca", "router": "0xcaf681a66d020601342297493863e78c959e5cb2", "fee": 100,  "stock": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "label": "Uniswap V3 (0.01%)" },
+        { "venue": "UNISWAP_V3", "kind": "univ3", "pool": "0xa9188730Fe85Be88ad499D7d52B099e800fB0334", "router": "0xcaf681a66d020601342297493863e78c959e5cb2", "fee": 3000, "stock": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "label": "Uniswap V3 (0.3%)" }
+      ] }
+  }
+}
