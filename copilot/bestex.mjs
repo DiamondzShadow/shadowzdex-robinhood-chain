@@ -20,6 +20,21 @@ const univ2Abi = [
   { name: "getReserves", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint112" }, { type: "uint112" }, { type: "uint32" }] },
   { name: "token0", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
 ];
+// Uniswap V3 pool — concentrated liquidity. Within the current tick range a V3 pool
+// is EXACTLY a constant-product pool over VIRTUAL reserves derived from the active
+// liquidity L and sqrtPriceX96:  x0 = L·2^96 / sqrtP,  x1 = L·sqrtP / 2^96. We
+// snapshot those once and quote via the same x·y=k math as `cp`/`univ2`, so the
+// off-chain split search stays synchronous. This is an IN-RANGE approximation
+// (large, tick-crossing fills diverge) — exact only for the current range — but the
+// spot mid is exact, the oracle-band guard is exact, and the IntentRouter's on-chain
+// minOut (attestor-set) is the real settlement guardrail. QuoterV2 remains the
+// source of truth for the actual fill.
+const univ3PoolAbi = [
+  { name: "slot0", type: "function", stateMutability: "view", inputs: [], outputs: [
+    { type: "uint160" }, { type: "int24" }, { type: "uint16" }, { type: "uint16" }, { type: "uint16" }, { type: "uint8" }, { type: "bool" } ] },
+  { name: "liquidity", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint128" }] },
+  { name: "token0", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+];
 // InventoryFillerAdapter — oracle-priced RFQ venue. We read its static params once
 // (price, spread, decimals, inventory) and compute the quote locally, identical to
 // the on-chain execute() math, so the off-chain search agrees with the fill.
@@ -109,6 +124,28 @@ export async function loadVenues(pub, venuesCfg, usdcAddr) {
           feeBps: BigInt(v.feeBps ?? 30),
         };
       }
+      if (kind === "univ3") {
+        const [slot0, liquidity, token0] = await Promise.all([
+          pub.readContract({ address: v.pool, abi: univ3PoolAbi, functionName: "slot0" }),
+          pub.readContract({ address: v.pool, abi: univ3PoolAbi, functionName: "liquidity" }),
+          pub.readContract({ address: v.pool, abi: univ3PoolAbi, functionName: "token0" }),
+        ]);
+        const sqrtP = BigInt(slot0[0]);         // sqrtPriceX96
+        const L = BigInt(liquidity);
+        const Q96 = 1n << 96n;
+        // Virtual reserves of the current range: token0 = L/sqrtP, token1 = L·sqrtP.
+        const vt0 = sqrtP > 0n ? (L * Q96) / sqrtP : 0n;
+        const vt1 = (L * sqrtP) / Q96;
+        const usdcIsToken0 = !!usdcAddr && token0.toLowerCase() === usdcAddr.toLowerCase();
+        // Uniswap fee units are hundredths-of-a-bip (500 = 0.05% = 5 bps).
+        return {
+          ...base,
+          fee: Number(v.fee ?? 500),
+          rUsdc: usdcIsToken0 ? vt0 : vt1,
+          rStock: usdcIsToken0 ? vt1 : vt0,
+          feeBps: BigInt(v.fee ?? 500) / 100n,
+        };
+      }
       const [rUsdc, rStock, feeBps] = await Promise.all([
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveUsdc" }),
         pub.readContract({ address: v.pool, abi: poolAbi, functionName: "reserveStock" }),
@@ -127,6 +164,14 @@ export function adapterDataFor(venue, tokenIn, tokenOut, encodeAbiParameters) {
     return encodeAbiParameters(
       [{ type: "address" }, { type: "address[]" }, { type: "bool" }],
       [venue.router, [tokenIn, tokenOut], false]
+    );
+  }
+  if (venue.kind === "univ3") {
+    // UniswapV3Adapter decodes (address v3Router, uint24 fee, bytes path). Empty
+    // path ⇒ single-hop exactInputSingle on the (tokenIn, tokenOut, fee) pool.
+    return encodeAbiParameters(
+      [{ type: "address" }, { type: "uint24" }, { type: "bytes" }],
+      [venue.router, venue.fee, "0x"]
     );
   }
   return "0x";
